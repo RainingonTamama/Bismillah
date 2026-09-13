@@ -1,0 +1,25 @@
+# Visual Studio / Rider
+.vs/
+.vscode/
+*.sln
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.VC.opendb
+
+# Unreal generated/build folders
+Binaries/
+Build/
+DerivedDataCache/
+Intermediate/
+Saved/
+.idea/
+
+# Unreal generated project files
+*.xcodeproj
+*.xcworkspace
+
+# Compiled source
+*.obj
+*.pdb
