@@ -6,6 +6,9 @@
 #include "BismillahCharacter.h"
 #include "BismillahSurvivor.generated.h"
 
+class UInputAction;
+class AInteractableBase;
+
 UENUM(BlueprintType)
 enum class ESurvivorState : uint8
 {
@@ -23,6 +26,10 @@ class BISMILLAH_API ABismillahSurvivor : public ABismillahCharacter
 
 protected:
     virtual void BeginPlay() override;
+
+    // NEW: Survivor now overrides SetupPlayerInputComponent to bind InteractAction.
+    // Must call Super so the inherited Move/Look/Jump bindings still fire.
+    virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 
 public:
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Health")
@@ -47,10 +54,31 @@ public:
 
     virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
+    // ---------------- Interaction (Milestone 1) ----------------
+
+    /** Enhanced Input Action for interaction. Assign IA_Interact on BP_BismillahSurvivor. */
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+    UInputAction* InteractAction;
+
+    /**
+     * Radius (cm) of the local proximity scan used to find nearby interactables.
+     * The actual accept/reject test is done against the interactable's own
+     * InteractionSphere radius (see TryInteract), not against this value alone.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Interaction")
+    float InteractionCheckRadius = 200.0f;
+
 protected:
     UFUNCTION()
     void OnRep_CurrentHealth();
 
     UFUNCTION()
     void OnRep_SurvivorState();
+
+    /** Local input entry point: finds a valid interactable and routes to Server_Interact. */
+    void TryInteract();
+
+    /** Server-authoritative execution. Mirrors the client->RPC->server pattern used by Killer melee. */
+    UFUNCTION(Server, Reliable)
+    void Server_Interact(AInteractableBase* Target);
 };
