@@ -8,6 +8,8 @@
 
 class UInputAction;
 class AInteractableBase;
+class AResourceNode;
+struct FInputActionValue;
 
 UENUM(BlueprintType)
 enum class ESurvivorState : uint8
@@ -24,14 +26,16 @@ class BISMILLAH_API ABismillahSurvivor : public ABismillahCharacter
 {
     GENERATED_BODY()
 
-protected:
-    virtual void BeginPlay() override;
+public:
+    ABismillahSurvivor();
 
-    // NEW: Survivor now overrides SetupPlayerInputComponent to bind InteractAction.
-    // Must call Super so the inherited Move/Look/Jump bindings still fire.
+    virtual void BeginPlay() override;
+    virtual void Tick(float DeltaSeconds) override;
+    virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
     virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 
-public:
+    // ---- Health / State -----------------------------------------------------
+
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Health")
     float MaxHealth = 100.0f;
 
@@ -52,21 +56,28 @@ public:
 
     virtual float TakeDamage(float DamageAmount, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 
-    virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+    // ---- Interaction input --------------------------------------------------
 
-    // ---------------- Interaction (Milestone 1) ----------------
-
-    /** Enhanced Input Action for interaction. Assign IA_Interact on BP_BismillahSurvivor. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
     UInputAction* InteractAction;
 
-    /**
-     * Radius (cm) of the local proximity scan used to find nearby interactables.
-     * The actual accept/reject test is done against the interactable's own
-     * InteractionSphere radius (see TryInteract), not against this value alone.
-     */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Interaction")
     float InteractionCheckRadius = 200.0f;
+
+    // ---- Collection tracking ------------------------------------------------
+
+    /**
+     * The node this survivor is currently collecting, or null.
+     * Replicated so client UI can bind a progress bar to that specific node.
+     */
+    UPROPERTY(ReplicatedUsing = OnRep_CurrentCollectingNode, BlueprintReadOnly, Category = "Interaction")
+    TObjectPtr<AResourceNode> CurrentCollectingNode = nullptr;
+
+    UFUNCTION(BlueprintImplementableEvent, Category = "Interaction")
+    void OnDisturbanceWhileCollecting(AResourceNode* Node);
+
+    UFUNCTION(BlueprintImplementableEvent, Category = "Interaction")
+    void OnCollectingNodeChanged(AResourceNode* NewNode);
 
 protected:
     UFUNCTION()
@@ -75,10 +86,27 @@ protected:
     UFUNCTION()
     void OnRep_SurvivorState();
 
+    UFUNCTION()
+    void OnRep_CurrentCollectingNode();
+
     /** Local input entry point: finds a valid interactable and routes to Server_Interact. */
     void TryInteract();
 
-    /** Server-authoritative execution. Mirrors the client->RPC->server pattern used by Killer melee. */
+    /** Server-authoritative interaction. Mirrors the Killer melee client->RPC->server pattern. */
     UFUNCTION(Server, Reliable)
     void Server_Interact(AInteractableBase* Target);
+
+    /**
+     * Second binding on MoveAction. Fires when the player provides movement input.
+     * If a collection is in progress, cancels it (per design: "if they move, cancel").
+     */
+    void OnMoveInputForCollection(const FInputActionValue& Value);
+
+    /** Server-side cancel of the current collection. */
+    UFUNCTION(Server, Reliable)
+    void Server_CancelCollection();
+
+private:
+    /** Server-only validation: cancels collection if survivor moved or left range. */
+    void ServerValidateCollection();
 };

@@ -3,10 +3,22 @@
 #include "BismillahSurvivor.h"
 #include "Net/UnrealNetwork.h"
 #include "EnhancedInputComponent.h"
+#include "InputAction.h"
+#include "InputActionValue.h"
 #include "Kismet/KismetSystemLibrary.h"
-#include "Components/SphereComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/SphereComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "Core/Interactables/InteractableBase.h"
+#include "Core/Interactables/ResourceNode.h"
+
+/** Horizontal velocity above which the server treats the survivor as "moving" during a collection. */
+static constexpr float CollectionMovementVelocityThreshold = 20.0f;
+
+ABismillahSurvivor::ABismillahSurvivor()
+{
+    PrimaryActorTick.bCanEverTick = true;
+}
 
 void ABismillahSurvivor::BeginPlay()
 {
@@ -17,9 +29,17 @@ void ABismillahSurvivor::BeginPlay()
     UE_LOG(LogTemp, Warning, TEXT("Survivor spawned"));
 }
 
+void ABismillahSurvivor::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+    DOREPLIFETIME(ABismillahSurvivor, CurrentHealth);
+    DOREPLIFETIME(ABismillahSurvivor, SurvivorState);
+    DOREPLIFETIME(ABismillahSurvivor, CurrentCollectingNode);
+}
+
 void ABismillahSurvivor::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
-    // Keep the base Move/Look/Jump bindings from ABismillahCharacter.
     Super::SetupPlayerInputComponent(PlayerInputComponent);
 
     if (UEnhancedInputComponent* EnhancedInput = Cast<UEnhancedInputComponent>(PlayerInputComponent))
@@ -32,6 +52,114 @@ void ABismillahSurvivor::SetupPlayerInputComponent(UInputComponent* PlayerInputC
         {
             UE_LOG(LogTemp, Warning, TEXT("ABismillahSurvivor: InteractAction is not assigned (set it on BP_BismillahSurvivor)."));
         }
+
+        // Second binding on MoveAction: fires whenever the player provides movement input.
+        // The base character's DoMove still fires (movement is not blocked here — we cancel
+        // the collection instead, which is what "if they move, cancel" requires).
+        if (MoveAction)
+        {
+            EnhancedInput->BindAction(MoveAction, ETriggerEvent::Triggered, this, &ABismillahSurvivor::OnMoveInputForCollection);
+        }
+    }
+}
+
+void ABismillahSurvivor::Tick(float DeltaSeconds)
+{
+    Super::Tick(DeltaSeconds);
+
+    // Only the server decides whether a collection is still valid.
+    if (!HasAuthority())
+    {
+        return;
+    }
+
+    ServerValidateCollection();
+}
+
+void ABismillahSurvivor::OnMoveInputForCollection(const FInputActionValue& Value)
+{
+    // We only need to react when a collection is active.
+    if (!CurrentCollectingNode)
+    {
+        return;
+    }
+
+    // Ignore zero-input frames (input can fire while keys are held, and on release).
+    const FVector2D Axis = Value.Get<FVector2D>();
+    if (Axis.IsNearlyZero())
+    {
+        return;
+    }
+
+    UE_LOG(LogTemp, Warning,
+        TEXT("OnMoveInputForCollection: movement input detected for '%s' during collection of '%s', requesting cancel."),
+        *GetName(), *CurrentCollectingNode->GetName());
+
+    Server_CancelCollection();
+}
+
+void ABismillahSurvivor::Server_CancelCollection_Implementation()
+{
+    if (!CurrentCollectingNode)
+    {
+        return;
+    }
+
+    UE_LOG(LogTemp, Warning, TEXT("Server_CancelCollection: cancelling collection of '%s' for '%s'."),
+        *CurrentCollectingNode->GetName(), *GetName());
+
+    CurrentCollectingNode->StopCollection(true);
+    CurrentCollectingNode = nullptr;
+}
+
+void ABismillahSurvivor::ServerValidateCollection()
+{
+    if (!CurrentCollectingNode)
+    {
+        return;
+    }
+
+    // If the node stopped collecting for any reason, clear our pointer.
+    if (!IsValid(CurrentCollectingNode)
+        || !CurrentCollectingNode->IsBeingCollected()
+        || CurrentCollectingNode->GetCurrentCollector() != this)
+    {
+        CurrentCollectingNode = nullptr;
+        return;
+    }
+
+    // ---- Movement check -----------------------------------------------------
+    // Even though the client sends Server_CancelCollection on movement input, we also
+    // enforce it server-side so a silent client cannot keep moving and collecting.
+    const float HorizVelocitySq = GetVelocity().SizeSquared2D();
+    if (HorizVelocitySq > FMath::Square(CollectionMovementVelocityThreshold))
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("ServerValidateCollection: '%s' is moving (v^2=%.1f) while collecting '%s', cancelling."),
+            *GetName(), HorizVelocitySq, *CurrentCollectingNode->GetName());
+
+        CurrentCollectingNode->StopCollection(true);
+        CurrentCollectingNode = nullptr;
+        return;
+    }
+
+    // ---- Distance check -----------------------------------------------------
+    // Real physical proximity against the node's own trigger sphere, same rule as
+    // Milestone 1's start check. Never "nearest node in the level".
+    const USphereComponent* NodeSphere = CurrentCollectingNode->GetInteractionSphere();
+    const float NodeRadius = NodeSphere ? NodeSphere->GetScaledSphereRadius() : 0.0f;
+    const float CapsuleRadius = GetCapsuleComponent() ? GetCapsuleComponent()->GetScaledCapsuleRadius() : 0.0f;
+    const float MaxDist = NodeRadius + CapsuleRadius + 50.0f; // 50cm forgiveness
+
+    const float DistSq = FVector::DistSquared(GetActorLocation(), CurrentCollectingNode->GetActorLocation());
+    if (DistSq > FMath::Square(MaxDist))
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("ServerValidateCollection: '%s' moved out of range of '%s' (dist^2=%.0f, max^2=%.0f), cancelling."),
+            *GetName(), *CurrentCollectingNode->GetName(), DistSq, FMath::Square(MaxDist));
+
+        CurrentCollectingNode->StopCollection(true);
+        CurrentCollectingNode = nullptr;
     }
 }
 
@@ -86,12 +214,9 @@ void ABismillahSurvivor::OnRep_SurvivorState()
 {
 }
 
-void ABismillahSurvivor::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+void ABismillahSurvivor::OnRep_CurrentCollectingNode()
 {
-    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
-
-    DOREPLIFETIME(ABismillahSurvivor, CurrentHealth);
-    DOREPLIFETIME(ABismillahSurvivor, SurvivorState);
+    OnCollectingNodeChanged(CurrentCollectingNode);
 }
 
 // ---------------- Interaction ----------------
@@ -100,7 +225,6 @@ void ABismillahSurvivor::TryInteract()
 {
     UE_LOG(LogTemp, Warning, TEXT("TryInteract: attempted by '%s'"), *GetName());
 
-    // Only the locally-controlled instance should send input to the server.
     if (!IsLocallyControlled())
     {
         return;
@@ -112,7 +236,6 @@ void ABismillahSurvivor::TryInteract()
         return;
     }
 
-    // --- Proximity scan: sphere overlap centered on the Survivor, filtered to AInteractableBase. ---
     TArray<TEnumAsByte<EObjectTypeQuery>> ObjectTypes;
     ObjectTypes.Add(UEngineTypes::ConvertToObjectType(ECC_WorldDynamic));
 
@@ -130,9 +253,6 @@ void ABismillahSurvivor::TryInteract()
         OverlappingActors
     );
 
-    // --- Validate *real* physical proximity to each candidate's own trigger sphere. ---
-    // We do NOT auto-select the nearest interactable in the level regardless of distance;
-    // the Survivor's capsule must actually be inside (or touching) that node's own sphere.
     const FVector SurvivorLoc = GetActorLocation();
     const float CapsuleRadius = GetCapsuleComponent() ? GetCapsuleComponent()->GetScaledCapsuleRadius() : 0.0f;
 
@@ -177,7 +297,6 @@ void ABismillahSurvivor::TryInteract()
         return;
     }
 
-    // Client -> Server RPC (same shape as ABismillahKiller::PerformAttack -> Server_PerformAttack).
     Server_Interact(BestInteractable);
 }
 
@@ -189,15 +308,43 @@ void ABismillahSurvivor::Server_Interact_Implementation(AInteractableBase* Targe
         return;
     }
 
-    // Re-validate on the server (client state cannot be trusted).
     if (!Target->CanInteract(this))
     {
         UE_LOG(LogTemp, Warning, TEXT("Server_Interact: '%s' refused interaction on server"), *Target->GetName());
         return;
     }
 
+    // If we're currently collecting a *different* node, stop that one first.
+    if (CurrentCollectingNode && CurrentCollectingNode != Target)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("Server_Interact: switching from '%s' to '%s'"),
+            *CurrentCollectingNode->GetName(), *Target->GetName());
+
+        CurrentCollectingNode->StopCollection(true);
+        CurrentCollectingNode = nullptr;
+    }
+
     UE_LOG(LogTemp, Warning, TEXT("Server_Interact: executing OnInteract on '%s' for '%s'"),
         *Target->GetName(), *GetName());
 
     Target->OnInteract(this);
+
+    // Sync our tracking pointer with the node's actual state after OnInteract ran.
+    if (AResourceNode* Node = Cast<AResourceNode>(Target))
+    {
+        if (Node->IsBeingCollected() && Node->GetCurrentCollector() == this)
+        {
+            CurrentCollectingNode = Node;
+
+            // Zero residual velocity so the survivor is cleanly stationary on start.
+            if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+            {
+                MoveComp->StopMovementImmediately();
+            }
+        }
+        else
+        {
+            CurrentCollectingNode = nullptr;
+        }
+    }
 }

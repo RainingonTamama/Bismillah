@@ -19,7 +19,7 @@ struct FSampleData : public FTableRowBase
 {
     GENERATED_BODY()
 
-    /** Unique identifier for this sample. Row name in the DataTable should match this. */
+    /** Unique identifier for this sample. Matched against AResourceNode::SampleID. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sample")
     FName SampleID;
 
@@ -35,11 +35,15 @@ struct FSampleData : public FTableRowBase
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sample")
     int32 ResearchValue = 0;
 
-    /** Seconds required to fully collect this node (used by a future milestone). */
+    /** Seconds required to fully collect this node. Set to 20.0 for the Rock. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sample")
-    float BaseCollectionTime = 1.0f;
+    float BaseCollectionTime = 20.0f;
 
     /** Scales disturbance chance in the future interruption system. Stored only for now. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sample")
     float InterruptionOddsMultiplier = 1.0f;
+
+    /** Seconds the node stays depleted after being fully collected. Set to 80.0 for the Rock. */
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sample")
+    float RechargeTime = 80.0f;
 };
