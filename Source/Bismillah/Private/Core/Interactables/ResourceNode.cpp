@@ -3,6 +3,7 @@
 #include "Core/Interactables/ResourceNode.h"
 #include "BismillahSurvivor.h"
 #include "Components/SphereComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Engine/DataTable.h"
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
@@ -16,6 +17,32 @@ AResourceNode::AResourceNode()
     PrimaryActorTick.TickInterval = 0.05f; // 20 Hz server tick for smooth progress
 
     bReplicates = true;
+
+    // ---- Visual mesh ------------------------------------------------------
+    // Root is InteractionSphere (set in AInteractableBase). Attach mesh to it so
+    // the actor's world location stays governed by the sphere, and designers can
+    // offset the mesh freely in the BP without moving the interaction volume.
+    MeshComponent = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("MeshComponent"));
+    MeshComponent->SetupAttachment(InteractionSphere);
+
+    // Decorative by default: the sphere handles interaction range, the mesh should
+    // not interfere with character movement or overlap queries.
+    MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    MeshComponent->SetGenerateOverlapEvents(false);
+    MeshComponent->SetMobility(EComponentMobility::Movable); // so BP can scale/rotate/animate
+
+    // If you want a SOLID rock the survivor cannot walk through, replace the
+    // NoCollision line above with:
+    //   MeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+    //   MeshComponent->SetCollisionObjectType(ECC_WorldStatic);
+    //   MeshComponent->SetCollisionResponseToAllChannels(ECR_Block);
+    // and re-check that nothing walks the character capsule through the rock
+    // (Blocking on the mesh does NOT block the interaction sphere — that stays overlap).
+
+    // No mesh asset assigned here on purpose. Designers assign per-BP:
+    //   BP_ResourceNode_Rock  -> MeshComponent -> Static Mesh = SM_Rock
+    //   BP_ResourceNode_Wood  -> MeshComponent -> Static Mesh = SM_Wood
+    //   etc.
 }
 
 void AResourceNode::BeginPlay()
@@ -61,9 +88,6 @@ bool AResourceNode::RefreshSampleData()
         return false;
     }
 
-    // DataTable::FindRow looks up by *row name*, not by the SampleID field.
-    // We treat the SampleID field as the identity (row name stays cosmetic), so we
-    // iterate rows and match on the field. This is the ONLY place that walks the table.
     static const FString ContextString(TEXT("AResourceNode::RefreshSampleData"));
 
     TArray<FSampleData*> AllRows;
@@ -100,7 +124,6 @@ float AResourceNode::GetRechargeTimeRemaining() const
         return 0.0f;
     }
 
-    // Use server world time when available; fall back to local world time.
     float Now = GetWorld()->GetTimeSeconds();
     if (const AGameStateBase* GS = GetWorld()->GetGameState())
     {
@@ -112,7 +135,6 @@ float AResourceNode::GetRechargeTimeRemaining() const
 
 bool AResourceNode::CanInteract_Implementation(APawn* InstigatorPawn)
 {
-    // A node whose data couldn't resolve has no duration, so it cannot be collected.
     if (!bHasValidSampleData)
     {
         return false;
@@ -123,8 +145,6 @@ bool AResourceNode::CanInteract_Implementation(APawn* InstigatorPawn)
         return false;
     }
 
-    // If someone else is collecting, refuse. The current collector may re-trigger
-    // (interpreted as cancel in OnInteract).
     if (bBeingCollected && CurrentCollector != InstigatorPawn)
     {
         return false;
@@ -158,7 +178,6 @@ void AResourceNode::OnInteract_Implementation(APawn* InstigatorPawn)
         return;
     }
 
-    // Same collector pressing again => cancel.
     if (bBeingCollected && CurrentCollector == InstigatorPawn)
     {
         UE_LOG(LogTemp, Warning, TEXT("ResourceNode '%s'::OnInteract: '%s' re-pressed, cancelling collection."),
@@ -235,7 +254,6 @@ void AResourceNode::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
 
-    // Only the server advances collection; clients only receive replicated state.
     if (!HasAuthority() || !bBeingCollected)
     {
         return;
@@ -252,7 +270,6 @@ void AResourceNode::ServerTickCollection(float DeltaSeconds)
         return;
     }
 
-    // Safety: collector gone (destroyed, disconnected).
     if (!IsValid(CurrentCollector))
     {
         UE_LOG(LogTemp, Warning, TEXT("ResourceNode '%s': collector became invalid, cancelling."), *GetName());
@@ -260,13 +277,11 @@ void AResourceNode::ServerTickCollection(float DeltaSeconds)
         return;
     }
 
-    // Advance progress.
     const float TotalTime = FMath::Max(CachedSampleData.BaseCollectionTime, 0.01f);
     CollectionProgress = FMath::Clamp(CollectionProgress + (DeltaSeconds / TotalTime), 0.0f, 1.0f);
 
     OnCollectionProgressChanged(CollectionProgress);
 
-    // Disturbance roll.
     const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
     if (Now - LastDisturbanceCheckTime >= DisturbanceCheckInterval)
     {
@@ -290,7 +305,6 @@ void AResourceNode::ServerTickCollection(float DeltaSeconds)
         }
     }
 
-    // Completed?
     if (CollectionProgress >= 1.0f)
     {
         APawn* Collector = CurrentCollector;
@@ -299,7 +313,6 @@ void AResourceNode::ServerTickCollection(float DeltaSeconds)
         CurrentCollector = nullptr;
         bDepleted = true;
 
-        // Set up recharge.
         const float RechargeTime = FMath::Max(CachedSampleData.RechargeTime, 0.01f);
         const float ServerNow = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
         RechargeEndTime = ServerNow + RechargeTime;
@@ -344,10 +357,8 @@ void AResourceNode::OnRep_BeingCollected()
     }
     else if (!bDepleted)
     {
-        // Stopped without going depleted => cancel.
         OnCollectionCancelled();
     }
-    // If bDepleted is true, OnRep_Depleted handles the completion signal.
 }
 
 void AResourceNode::OnRep_CollectionProgress()
@@ -359,7 +370,6 @@ void AResourceNode::OnRep_Depleted()
 {
     if (bDepleted)
     {
-        // Collector info is not guaranteed on the client in this exact frame.
         OnCollectionCompleted(nullptr);
         OnDepleted();
     }

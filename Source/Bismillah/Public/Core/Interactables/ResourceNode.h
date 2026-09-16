@@ -9,17 +9,29 @@
 
 class UDataTable;
 class APawn;
+class UStaticMeshComponent;
 
 /**
  * A collectible sample node.
  * Milestone 2.1: server-authoritative collection timer, replicated progress,
  * movement-cancel support, and depleted/recharge cycle.
  *
+ * VISUAL
+ * ------
+ * MeshComponent is the visible representation. Assign a StaticMesh asset on the
+ * BP child (BP_ResourceNode_Rock) — C++ provides no default. Collision is off by
+ * default; see the constructor for how to make it solid.
+ *
+ * UPGRADE PATH (if you later want authored skeletal animations):
+ *   Change UStaticMeshComponent to USkeletalMeshComponent here, and in the
+ *   .cpp include + CreateDefaultSubobject call. Assign an Anim Class on the BP.
+ *   Everything else (state events, replication) stays identical.
+ *
  * PERFORMANCE / MULTIPLAYER NOTES
  * --------------------------------
  * - FSampleData resolved ONCE at BeginPlay and cached in CachedSampleData.
  * - Tick runs only on the server (disabled on clients in BeginPlay).
- * - Recharge is implemented via FTimerManager, not Tick. It does not consume tick budget.
+ * - Recharge uses FTimerManager, not Tick — does not consume tick budget.
  * - All collection/recharge state mutated only under HasAuthority().
  *   Clients react via OnRep_*.
  */
@@ -35,6 +47,16 @@ public:
     virtual void Tick(float DeltaSeconds) override;
     virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
+    // ---- Visual -------------------------------------------------------------
+
+    /** The visible representation. Assign a StaticMesh asset on the BP child. */
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Visual")
+    UStaticMeshComponent* MeshComponent;
+
+    /** Convenience accessor for BP (self -> GetMeshComponent). */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Visual")
+    UStaticMeshComponent* GetMeshComponent() const { return MeshComponent; }
+
     // ---- Design-time config -------------------------------------------------
 
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sample")
@@ -43,11 +65,9 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sample")
     UDataTable* SampleDataTable;
 
-    /** How often the disturbance chance is rolled while collecting, in seconds. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collection")
     float DisturbanceCheckInterval = 0.5f;
 
-    /** Base chance per roll. Final = BaseDisturbanceChance * InterruptionOddsMultiplier. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collection")
     float BaseDisturbanceChance = 0.1f;
 
@@ -70,14 +90,9 @@ public:
     UPROPERTY(ReplicatedUsing = OnRep_CollectionProgress, BlueprintReadOnly, Category = "Collection")
     float CollectionProgress = 0.0f;
 
-    /** True while depleted (post-collection, pre-recharge). */
     UPROPERTY(ReplicatedUsing = OnRep_Depleted, BlueprintReadOnly, Category = "Collection")
     bool bDepleted = false;
 
-    /**
-     * Server world time at which the recharge finishes. 0 when not depleted.
-     * Clients can use GetRechargeTimeRemaining() for a countdown.
-     */
     UPROPERTY(Replicated, BlueprintReadOnly, Category = "Collection")
     float RechargeEndTime = 0.0f;
 
@@ -101,15 +116,12 @@ public:
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Collection")
     APawn* GetCurrentCollector() const { return CurrentCollector; }
 
-    /** 0 means no recharge pending. Otherwise seconds until the node is collectable again. */
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Collection")
     float GetRechargeTimeRemaining() const;
 
-    /** Server-only. Begin collecting. Fails if already occupied, depleted, or data missing. */
     UFUNCTION(BlueprintCallable, Category = "Collection")
     bool StartCollection(APawn* Collector);
 
-    /** Server-only. Stop collecting. bResetProgress=true resets progress to 0. */
     UFUNCTION(BlueprintCallable, Category = "Collection")
     void StopCollection(bool bResetProgress = true);
 
@@ -118,7 +130,7 @@ public:
     virtual bool CanInteract_Implementation(APawn* InstigatorPawn) override;
     virtual void OnInteract_Implementation(APawn* InstigatorPawn) override;
 
-    // ---- Blueprint hooks (fired on server and mirrored on clients via OnRep) ----
+    // ---- Blueprint hooks ---------------------------------------------------
 
     UFUNCTION(BlueprintImplementableEvent, Category = "Collection")
     void OnCollectionStarted();
@@ -129,19 +141,15 @@ public:
     UFUNCTION(BlueprintImplementableEvent, Category = "Collection")
     void OnCollectionCancelled();
 
-    /** Server fires with the collector; clients fire with null (collector pointer not guaranteed). */
     UFUNCTION(BlueprintImplementableEvent, Category = "Collection")
     void OnCollectionCompleted(APawn* Collector);
 
-    /** Server-only hook for the future interruption mini-game. Not implemented yet. */
     UFUNCTION(BlueprintImplementableEvent, Category = "Collection")
     void OnDisturbanceTriggered();
 
-    /** Node became depleted (just collected). */
     UFUNCTION(BlueprintImplementableEvent, Category = "Collection")
     void OnDepleted();
 
-    /** Node finished recharging and is collectable again. */
     UFUNCTION(BlueprintImplementableEvent, Category = "Collection")
     void OnRecharged();
 
