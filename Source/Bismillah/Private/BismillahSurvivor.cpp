@@ -76,6 +76,32 @@ void ABismillahSurvivor::Tick(float DeltaSeconds)
     ServerValidateCollection();
 }
 
+// ---------------- Collection node tracking ----------------
+
+void ABismillahSurvivor::SetCurrentCollectingNode(AResourceNode* NewNode)
+{
+    if (CurrentCollectingNode == NewNode)
+    {
+        return;
+    }
+
+    CurrentCollectingNode = NewNode;
+
+    // OnRep only fires on clients. On the authority (listen server) we must fire
+    // the event explicitly, otherwise the host's own player never gets notified.
+    if (HasAuthority())
+    {
+        OnCollectingNodeChanged(CurrentCollectingNode);
+    }
+}
+
+void ABismillahSurvivor::OnRep_CurrentCollectingNode()
+{
+    OnCollectingNodeChanged(CurrentCollectingNode);
+}
+
+// ---------------- Movement cancel ----------------
+
 void ABismillahSurvivor::OnMoveInputForCollection(const FInputActionValue& Value)
 {
     // We only need to react when a collection is active.
@@ -109,8 +135,10 @@ void ABismillahSurvivor::Server_CancelCollection_Implementation()
         *CurrentCollectingNode->GetName(), *GetName());
 
     CurrentCollectingNode->StopCollection(true);
-    CurrentCollectingNode = nullptr;
+    SetCurrentCollectingNode(nullptr);
 }
+
+// ---------------- Server validation ----------------
 
 void ABismillahSurvivor::ServerValidateCollection()
 {
@@ -124,7 +152,7 @@ void ABismillahSurvivor::ServerValidateCollection()
         || !CurrentCollectingNode->IsBeingCollected()
         || CurrentCollectingNode->GetCurrentCollector() != this)
     {
-        CurrentCollectingNode = nullptr;
+        SetCurrentCollectingNode(nullptr);
         return;
     }
 
@@ -139,7 +167,7 @@ void ABismillahSurvivor::ServerValidateCollection()
             *GetName(), HorizVelocitySq, *CurrentCollectingNode->GetName());
 
         CurrentCollectingNode->StopCollection(true);
-        CurrentCollectingNode = nullptr;
+        SetCurrentCollectingNode(nullptr);
         return;
     }
 
@@ -159,9 +187,11 @@ void ABismillahSurvivor::ServerValidateCollection()
             *GetName(), *CurrentCollectingNode->GetName(), DistSq, FMath::Square(MaxDist));
 
         CurrentCollectingNode->StopCollection(true);
-        CurrentCollectingNode = nullptr;
+        SetCurrentCollectingNode(nullptr);
     }
 }
+
+// ---------------- Health / State ----------------
 
 void ABismillahSurvivor::ModifyHealth(float Amount)
 {
@@ -212,11 +242,6 @@ void ABismillahSurvivor::SetSurvivorState(ESurvivorState NewState)
 
 void ABismillahSurvivor::OnRep_SurvivorState()
 {
-}
-
-void ABismillahSurvivor::OnRep_CurrentCollectingNode()
-{
-    OnCollectingNodeChanged(CurrentCollectingNode);
 }
 
 // ---------------- Interaction ----------------
@@ -321,7 +346,7 @@ void ABismillahSurvivor::Server_Interact_Implementation(AInteractableBase* Targe
             *CurrentCollectingNode->GetName(), *Target->GetName());
 
         CurrentCollectingNode->StopCollection(true);
-        CurrentCollectingNode = nullptr;
+        SetCurrentCollectingNode(nullptr);
     }
 
     UE_LOG(LogTemp, Warning, TEXT("Server_Interact: executing OnInteract on '%s' for '%s'"),
@@ -334,7 +359,7 @@ void ABismillahSurvivor::Server_Interact_Implementation(AInteractableBase* Targe
     {
         if (Node->IsBeingCollected() && Node->GetCurrentCollector() == this)
         {
-            CurrentCollectingNode = Node;
+            SetCurrentCollectingNode(Node);
 
             // Zero residual velocity so the survivor is cleanly stationary on start.
             if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
@@ -344,7 +369,7 @@ void ABismillahSurvivor::Server_Interact_Implementation(AInteractableBase* Targe
         }
         else
         {
-            CurrentCollectingNode = nullptr;
+            SetCurrentCollectingNode(nullptr);
         }
     }
 }

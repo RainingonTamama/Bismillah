@@ -69,6 +69,10 @@ public:
     /**
      * The node this survivor is currently collecting, or null.
      * Replicated so client UI can bind a progress bar to that specific node.
+     *
+     * DO NOT assign this directly from C++. Always call SetCurrentCollectingNode()
+     * so the OnCollectingNodeChanged event fires correctly on BOTH the authority
+     * (listen server) and clients. The authority does not receive OnRep callbacks.
      */
     UPROPERTY(ReplicatedUsing = OnRep_CurrentCollectingNode, BlueprintReadOnly, Category = "Interaction")
     TObjectPtr<AResourceNode> CurrentCollectingNode = nullptr;
@@ -107,6 +111,13 @@ protected:
     void Server_CancelCollection();
 
 private:
+    /**
+     * Centralized setter for CurrentCollectingNode.
+     * Fires OnCollectingNodeChanged immediately when running on the authority,
+     * because OnRep only fires on clients. Early-outs if the value is unchanged.
+     */
+    void SetCurrentCollectingNode(AResourceNode* NewNode);
+
     /** Server-only validation: cancels collection if survivor moved or left range. */
     void ServerValidateCollection();
 };

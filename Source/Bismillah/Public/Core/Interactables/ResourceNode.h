@@ -16,16 +16,13 @@ class UStaticMeshComponent;
  * Milestone 2.1: server-authoritative collection timer, replicated progress,
  * movement-cancel support, and depleted/recharge cycle.
  *
- * VISUAL
- * ------
- * MeshComponent is the visible representation. Assign a StaticMesh asset on the
- * BP child (BP_ResourceNode_Rock) — C++ provides no default. Collision is off by
- * default; see the constructor for how to make it solid.
- *
- * UPGRADE PATH (if you later want authored skeletal animations):
- *   Change UStaticMeshComponent to USkeletalMeshComponent here, and in the
- *   .cpp include + CreateDefaultSubobject call. Assign an Anim Class on the BP.
- *   Everything else (state events, replication) stays identical.
+ * VISUAL (placeholder)
+ * --------------------
+ * MeshComponent is a UStaticMeshComponent. For now, assign /Engine/BasicShapes/Sphere
+ * on BP_ResourceNode_Rock. When you reach the polishing milestone and want authored
+ * skeletal animations (ready / collecting / cancelled / completed), swap the component
+ * type to USkeletalMeshComponent — see the bottom of ResourceNode.cpp for the exact
+ * two lines to change.
  *
  * PERFORMANCE / MULTIPLAYER NOTES
  * --------------------------------
@@ -49,11 +46,11 @@ public:
 
     // ---- Visual -------------------------------------------------------------
 
-    /** The visible representation. Assign a StaticMesh asset on the BP child. */
+    /** The visible representation. Assign /Engine/BasicShapes/Sphere on the BP child. */
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Visual")
     UStaticMeshComponent* MeshComponent;
 
-    /** Convenience accessor for BP (self -> GetMeshComponent). */
+    /** Convenience accessor for BP. */
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Visual")
     UStaticMeshComponent* GetMeshComponent() const { return MeshComponent; }
 

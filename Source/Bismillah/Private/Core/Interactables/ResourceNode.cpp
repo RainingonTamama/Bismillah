@@ -29,20 +29,24 @@ AResourceNode::AResourceNode()
     // not interfere with character movement or overlap queries.
     MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
     MeshComponent->SetGenerateOverlapEvents(false);
-    MeshComponent->SetMobility(EComponentMobility::Movable); // so BP can scale/rotate/animate
+    MeshComponent->SetMobility(EComponentMobility::Movable);
 
-    // If you want a SOLID rock the survivor cannot walk through, replace the
-    // NoCollision line above with:
-    //   MeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-    //   MeshComponent->SetCollisionObjectType(ECC_WorldStatic);
-    //   MeshComponent->SetCollisionResponseToAllChannels(ECR_Block);
-    // and re-check that nothing walks the character capsule through the rock
-    // (Blocking on the mesh does NOT block the interaction sphere — that stays overlap).
+    // No mesh asset assigned here on purpose. Designers assign per-BP. For the
+    // placeholder pass, assign /Engine/BasicShapes/Sphere on BP_ResourceNode_Rock.
 
-    // No mesh asset assigned here on purpose. Designers assign per-BP:
-    //   BP_ResourceNode_Rock  -> MeshComponent -> Static Mesh = SM_Rock
-    //   BP_ResourceNode_Wood  -> MeshComponent -> Static Mesh = SM_Wood
-    //   etc.
+    // -----------------------------------------------------------------------
+    // UPGRADE PATH (polishing milestone): to switch to a skeletal mesh later:
+    //   1. In ResourceNode.h:
+    //        class UStaticMeshComponent;   ->  class USkeletalMeshComponent;
+    //        UStaticMeshComponent* MeshComponent; -> USkeletalMeshComponent* MeshComponent;
+    //        UStaticMeshComponent* GetMeshComponent() const ... -> USkeletalMeshComponent*
+    //   2. In ResourceNode.cpp:
+    //        #include "Components/StaticMeshComponent.h"
+    //          -> #include "Components/SkeletalMeshComponent.h"
+    //        CreateDefaultSubobject<UStaticMeshComponent>(...) -> USkeletalMeshComponent
+    //   3. On BP_ResourceNode_Rock, assign a Skeletal Mesh + Anim Class.
+    // Everything else (state events, replication) is unchanged.
+    // -----------------------------------------------------------------------
 }
 
 void AResourceNode::BeginPlay()
