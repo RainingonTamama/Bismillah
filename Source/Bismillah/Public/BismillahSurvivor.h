@@ -93,31 +93,24 @@ protected:
     UFUNCTION()
     void OnRep_CurrentCollectingNode();
 
-    /** Local input entry point: finds a valid interactable and routes to Server_Interact. */
     void TryInteract();
 
-    /** Server-authoritative interaction. Mirrors the Killer melee client->RPC->server pattern. */
     UFUNCTION(Server, Reliable)
     void Server_Interact(AInteractableBase* Target);
 
     /**
-     * Second binding on MoveAction. Fires when the player provides movement input.
-     * If a collection is in progress, cancels it (per design: "if they move, cancel").
+     * Sent when the player presses Interact while a mini-game is active on the
+     * node they're collecting. Server validates timing internally.
      */
+    UFUNCTION(Server, Reliable)
+    void Server_NotifyMiniGamePress();
+
     void OnMoveInputForCollection(const FInputActionValue& Value);
 
-    /** Server-side cancel of the current collection. */
     UFUNCTION(Server, Reliable)
     void Server_CancelCollection();
 
 private:
-    /**
-     * Centralized setter for CurrentCollectingNode.
-     * Fires OnCollectingNodeChanged immediately when running on the authority,
-     * because OnRep only fires on clients. Early-outs if the value is unchanged.
-     */
     void SetCurrentCollectingNode(AResourceNode* NewNode);
-
-    /** Server-only validation: cancels collection if survivor moved or left range. */
     void ServerValidateCollection();
 };

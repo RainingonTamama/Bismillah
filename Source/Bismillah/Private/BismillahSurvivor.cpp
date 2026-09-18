@@ -53,9 +53,6 @@ void ABismillahSurvivor::SetupPlayerInputComponent(UInputComponent* PlayerInputC
             UE_LOG(LogTemp, Warning, TEXT("ABismillahSurvivor: InteractAction is not assigned (set it on BP_BismillahSurvivor)."));
         }
 
-        // Second binding on MoveAction: fires whenever the player provides movement input.
-        // The base character's DoMove still fires (movement is not blocked here — we cancel
-        // the collection instead, which is what "if they move, cancel" requires).
         if (MoveAction)
         {
             EnhancedInput->BindAction(MoveAction, ETriggerEvent::Triggered, this, &ABismillahSurvivor::OnMoveInputForCollection);
@@ -67,7 +64,6 @@ void ABismillahSurvivor::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
 
-    // Only the server decides whether a collection is still valid.
     if (!HasAuthority())
     {
         return;
@@ -104,13 +100,11 @@ void ABismillahSurvivor::OnRep_CurrentCollectingNode()
 
 void ABismillahSurvivor::OnMoveInputForCollection(const FInputActionValue& Value)
 {
-    // We only need to react when a collection is active.
     if (!CurrentCollectingNode)
     {
         return;
     }
 
-    // Ignore zero-input frames (input can fire while keys are held, and on release).
     const FVector2D Axis = Value.Get<FVector2D>();
     if (Axis.IsNearlyZero())
     {
@@ -147,7 +141,6 @@ void ABismillahSurvivor::ServerValidateCollection()
         return;
     }
 
-    // If the node stopped collecting for any reason, clear our pointer.
     if (!IsValid(CurrentCollectingNode)
         || !CurrentCollectingNode->IsBeingCollected()
         || CurrentCollectingNode->GetCurrentCollector() != this)
@@ -156,9 +149,7 @@ void ABismillahSurvivor::ServerValidateCollection()
         return;
     }
 
-    // ---- Movement check -----------------------------------------------------
-    // Even though the client sends Server_CancelCollection on movement input, we also
-    // enforce it server-side so a silent client cannot keep moving and collecting.
+    // Movement check.
     const float HorizVelocitySq = GetVelocity().SizeSquared2D();
     if (HorizVelocitySq > FMath::Square(CollectionMovementVelocityThreshold))
     {
@@ -171,13 +162,11 @@ void ABismillahSurvivor::ServerValidateCollection()
         return;
     }
 
-    // ---- Distance check -----------------------------------------------------
-    // Real physical proximity against the node's own trigger sphere, same rule as
-    // Milestone 1's start check. Never "nearest node in the level".
+    // Distance check.
     const USphereComponent* NodeSphere = CurrentCollectingNode->GetInteractionSphere();
     const float NodeRadius = NodeSphere ? NodeSphere->GetScaledSphereRadius() : 0.0f;
     const float CapsuleRadius = GetCapsuleComponent() ? GetCapsuleComponent()->GetScaledCapsuleRadius() : 0.0f;
-    const float MaxDist = NodeRadius + CapsuleRadius + 50.0f; // 50cm forgiveness
+    const float MaxDist = NodeRadius + CapsuleRadius + 50.0f;
 
     const float DistSq = FVector::DistSquared(GetActorLocation(), CurrentCollectingNode->GetActorLocation());
     if (DistSq > FMath::Square(MaxDist))
@@ -248,12 +237,21 @@ void ABismillahSurvivor::OnRep_SurvivorState()
 
 void ABismillahSurvivor::TryInteract()
 {
-    UE_LOG(LogTemp, Warning, TEXT("TryInteract: attempted by '%s'"), *GetName());
-
     if (!IsLocallyControlled())
     {
         return;
     }
+
+    // ---- Mini-game routing: if a mini-game is active on the node we're collecting,
+    //      this press resolves it instead of interacting.
+    if (CurrentCollectingNode && CurrentCollectingNode->IsAwaitingMiniGame())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("TryInteract: routing to Server_NotifyMiniGamePress (mini-game active)."));
+        Server_NotifyMiniGamePress();
+        return;
+    }
+
+    UE_LOG(LogTemp, Warning, TEXT("TryInteract: attempted by '%s'"), *GetName());
 
     UWorld* World = GetWorld();
     if (!World)
@@ -325,6 +323,35 @@ void ABismillahSurvivor::TryInteract()
     Server_Interact(BestInteractable);
 }
 
+void ABismillahSurvivor::Server_NotifyMiniGamePress_Implementation()
+{
+    if (!CurrentCollectingNode)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("Server_NotifyMiniGamePress: no CurrentCollectingNode."));
+        return;
+    }
+
+    if (!CurrentCollectingNode->IsBeingCollected() || CurrentCollectingNode->GetCurrentCollector() != this)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("Server_NotifyMiniGamePress: we are not the collector of '%s'."),
+            *CurrentCollectingNode->GetName());
+        return;
+    }
+
+    if (!CurrentCollectingNode->IsAwaitingMiniGame())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("Server_NotifyMiniGamePress: node '%s' is not awaiting a mini-game."),
+            *CurrentCollectingNode->GetName());
+        return;
+    }
+
+    UE_LOG(LogTemp, Warning, TEXT("Server_NotifyMiniGamePress: forwarding to node '%s' for resolution."),
+        *CurrentCollectingNode->GetName());
+
+    // The node decides success vs. failure based on server time vs. its deadline.
+    CurrentCollectingNode->ResolveMiniGame();
+}
+
 void ABismillahSurvivor::Server_Interact_Implementation(AInteractableBase* Target)
 {
     if (!Target)
@@ -339,7 +366,6 @@ void ABismillahSurvivor::Server_Interact_Implementation(AInteractableBase* Targe
         return;
     }
 
-    // If we're currently collecting a *different* node, stop that one first.
     if (CurrentCollectingNode && CurrentCollectingNode != Target)
     {
         UE_LOG(LogTemp, Warning, TEXT("Server_Interact: switching from '%s' to '%s'"),
@@ -354,14 +380,12 @@ void ABismillahSurvivor::Server_Interact_Implementation(AInteractableBase* Targe
 
     Target->OnInteract(this);
 
-    // Sync our tracking pointer with the node's actual state after OnInteract ran.
     if (AResourceNode* Node = Cast<AResourceNode>(Target))
     {
         if (Node->IsBeingCollected() && Node->GetCurrentCollector() == this)
         {
             SetCurrentCollectingNode(Node);
 
-            // Zero residual velocity so the survivor is cleanly stationary on start.
             if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
             {
                 MoveComp->StopMovementImmediately();

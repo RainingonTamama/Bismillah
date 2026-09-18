@@ -19,9 +19,8 @@ AResourceNode::AResourceNode()
     bReplicates = true;
 
     // ---- Visual mesh ------------------------------------------------------
-    // Root is InteractionSphere (set in AInteractableBase). Attach mesh to it so
-    // the actor's world location stays governed by the sphere, and designers can
-    // offset the mesh freely in the BP without moving the interaction volume.
+    // Root is InteractionSphere (set in AInteractableBase). Mesh is attached to it
+    // so the actor's world location stays governed by the sphere.
     MeshComponent = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("MeshComponent"));
     MeshComponent->SetupAttachment(InteractionSphere);
 
@@ -30,23 +29,6 @@ AResourceNode::AResourceNode()
     MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
     MeshComponent->SetGenerateOverlapEvents(false);
     MeshComponent->SetMobility(EComponentMobility::Movable);
-
-    // No mesh asset assigned here on purpose. Designers assign per-BP. For the
-    // placeholder pass, assign /Engine/BasicShapes/Sphere on BP_ResourceNode_Rock.
-
-    // -----------------------------------------------------------------------
-    // UPGRADE PATH (polishing milestone): to switch to a skeletal mesh later:
-    //   1. In ResourceNode.h:
-    //        class UStaticMeshComponent;   ->  class USkeletalMeshComponent;
-    //        UStaticMeshComponent* MeshComponent; -> USkeletalMeshComponent* MeshComponent;
-    //        UStaticMeshComponent* GetMeshComponent() const ... -> USkeletalMeshComponent*
-    //   2. In ResourceNode.cpp:
-    //        #include "Components/StaticMeshComponent.h"
-    //          -> #include "Components/SkeletalMeshComponent.h"
-    //        CreateDefaultSubobject<UStaticMeshComponent>(...) -> USkeletalMeshComponent
-    //   3. On BP_ResourceNode_Rock, assign a Skeletal Mesh + Anim Class.
-    // Everything else (state events, replication) is unchanged.
-    // -----------------------------------------------------------------------
 }
 
 void AResourceNode::BeginPlay()
@@ -80,6 +62,23 @@ void AResourceNode::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLif
     DOREPLIFETIME(AResourceNode, CollectionProgress);
     DOREPLIFETIME(AResourceNode, bDepleted);
     DOREPLIFETIME(AResourceNode, RechargeEndTime);
+    DOREPLIFETIME(AResourceNode, bAwaitingMiniGame);
+    DOREPLIFETIME(AResourceNode, MiniGameDeadline);
+}
+
+float AResourceNode::GetServerWorldTime() const
+{
+    if (!GetWorld())
+    {
+        return 0.0f;
+    }
+
+    if (const AGameStateBase* GS = GetWorld()->GetGameState())
+    {
+        return GS->GetServerWorldTimeSeconds();
+    }
+
+    return GetWorld()->GetTimeSeconds();
 }
 
 bool AResourceNode::RefreshSampleData()
@@ -128,13 +127,17 @@ float AResourceNode::GetRechargeTimeRemaining() const
         return 0.0f;
     }
 
-    float Now = GetWorld()->GetTimeSeconds();
-    if (const AGameStateBase* GS = GetWorld()->GetGameState())
+    return FMath::Max(0.0f, RechargeEndTime - GetServerWorldTime());
+}
+
+float AResourceNode::GetMiniGameTimeRemaining() const
+{
+    if (!bAwaitingMiniGame || MiniGameDeadline <= 0.0f)
     {
-        Now = GS->GetServerWorldTimeSeconds();
+        return 0.0f;
     }
 
-    return FMath::Max(0.0f, RechargeEndTime - Now);
+    return FMath::Max(0.0f, MiniGameDeadline - GetServerWorldTime());
 }
 
 bool AResourceNode::CanInteract_Implementation(APawn* InstigatorPawn)
@@ -182,6 +185,16 @@ void AResourceNode::OnInteract_Implementation(APawn* InstigatorPawn)
         return;
     }
 
+    // If a mini-game is active on this node for this collector, ignore the press here.
+    // The survivor's TryInteract routes presses to the mini-game resolve path instead.
+    if (bAwaitingMiniGame && CurrentCollector == InstigatorPawn)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("ResourceNode '%s'::OnInteract: mini-game active for '%s'; ignoring interact."),
+            *GetName(), *InstigatorPawn->GetName());
+        return;
+    }
+
     if (bBeingCollected && CurrentCollector == InstigatorPawn)
     {
         UE_LOG(LogTemp, Warning, TEXT("ResourceNode '%s'::OnInteract: '%s' re-pressed, cancelling collection."),
@@ -215,7 +228,9 @@ bool AResourceNode::StartCollection(APawn* Collector)
     bBeingCollected = true;
     CurrentCollector = Collector;
     CollectionProgress = 0.0f;
-    LastDisturbanceCheckTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+    bAwaitingMiniGame = false;
+    MiniGameDeadline = 0.0f;
+    LastDisturbanceCheckTime = GetServerWorldTime();
 
     UE_LOG(LogTemp, Warning,
         TEXT("ResourceNode '%s': StartCollection by '%s' (BaseCollectionTime=%.2f, RechargeTime=%.2f, InterruptionOddsMultiplier=%.2f)"),
@@ -242,6 +257,9 @@ void AResourceNode::StopCollection(bool bResetProgress)
 
     bBeingCollected = false;
     CurrentCollector = nullptr;
+    bAwaitingMiniGame = false;
+    MiniGameDeadline = 0.0f;
+
     if (bResetProgress)
     {
         CollectionProgress = 0.0f;
@@ -252,6 +270,48 @@ void AResourceNode::StopCollection(bool bResetProgress)
 
     OnCollectionProgressChanged(CollectionProgress);
     OnCollectionCancelled();
+}
+
+void AResourceNode::ResolveMiniGame()
+{
+    if (!HasAuthority() || !bBeingCollected || !bAwaitingMiniGame)
+    {
+        return;
+    }
+
+    const float Now = GetServerWorldTime();
+    const bool bSuccess = (Now <= MiniGameDeadline);
+
+    // Clear the mini-game state first so any re-entrant call can't double-resolve.
+    bAwaitingMiniGame = false;
+    MiniGameDeadline = 0.0f;
+
+    if (bSuccess)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("ResourceNode '%s': mini-game SUCCESS. Collection resumes."), *GetName());
+        OnMiniGameResolved(true);
+    }
+    else
+    {
+        CollectionProgress = FMath::Max(0.0f, CollectionProgress - MiniGameFailurePenalty);
+
+        UE_LOG(LogTemp, Warning,
+            TEXT("ResourceNode '%s': mini-game FAILED (timed out). Progress reduced by %.0f%%, now %.2f. Broadcasting alert."),
+            *GetName(), MiniGameFailurePenalty * 100.0f, CollectionProgress);
+
+        OnMiniGameResolved(false);
+
+        // Broadcast the alert so every client can play sound + VFX at the node location.
+        Multicast_BroadcastDisturbanceAlert(GetActorLocation());
+
+        // Also notify the survivor that they failed (server-side, for server-hosted UI).
+        if (ABismillahSurvivor* Survivor = Cast<ABismillahSurvivor>(CurrentCollector))
+        {
+            Survivor->OnDisturbanceWhileCollecting(this);
+        }
+    }
+
+    OnCollectionProgressChanged(CollectionProgress);
 }
 
 void AResourceNode::Tick(float DeltaSeconds)
@@ -281,34 +341,25 @@ void AResourceNode::ServerTickCollection(float DeltaSeconds)
         return;
     }
 
+    // ---- Mini-game check FIRST: if active, hold progress and check for timeout.
+    if (bAwaitingMiniGame)
+    {
+        if (GetServerWorldTime() > MiniGameDeadline)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("ResourceNode '%s': mini-game deadline passed with no input."), *GetName());
+            ResolveMiniGame(); // computes bSuccess=false because Now > Deadline
+        }
+        return; // no progress while waiting for input
+    }
+
+    // ---- Advance progress.
     const float TotalTime = FMath::Max(CachedSampleData.BaseCollectionTime, 0.01f);
     CollectionProgress = FMath::Clamp(CollectionProgress + (DeltaSeconds / TotalTime), 0.0f, 1.0f);
 
     OnCollectionProgressChanged(CollectionProgress);
 
-    const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
-    if (Now - LastDisturbanceCheckTime >= DisturbanceCheckInterval)
-    {
-        LastDisturbanceCheckTime = Now;
-
-        const float Chance = FMath::Clamp(
-            BaseDisturbanceChance * CachedSampleData.InterruptionOddsMultiplier, 0.0f, 1.0f);
-
-        if (FMath::FRand() < Chance)
-        {
-            UE_LOG(LogTemp, Warning,
-                TEXT("ResourceNode '%s': disturbance triggered for '%s' (chance=%.3f). Mini-game not yet implemented."),
-                *GetName(), *GetNameSafe(CurrentCollector), Chance);
-
-            OnDisturbanceTriggered();
-
-            if (ABismillahSurvivor* Survivor = Cast<ABismillahSurvivor>(CurrentCollector))
-            {
-                Survivor->OnDisturbanceWhileCollecting(this);
-            }
-        }
-    }
-
+    // ---- Completion check BEFORE the disturbance roll: never fire a mini-game
+    //      on the same tick that collection completes.
     if (CollectionProgress >= 1.0f)
     {
         APawn* Collector = CurrentCollector;
@@ -318,8 +369,7 @@ void AResourceNode::ServerTickCollection(float DeltaSeconds)
         bDepleted = true;
 
         const float RechargeTime = FMath::Max(CachedSampleData.RechargeTime, 0.01f);
-        const float ServerNow = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
-        RechargeEndTime = ServerNow + RechargeTime;
+        RechargeEndTime = GetServerWorldTime() + RechargeTime;
 
         UE_LOG(LogTemp, Warning,
             TEXT("ResourceNode '%s': collection COMPLETE by '%s'. Recharging for %.2fs."),
@@ -332,6 +382,30 @@ void AResourceNode::ServerTickCollection(float DeltaSeconds)
         {
             GetWorldTimerManager().SetTimer(
                 RechargeTimerHandle, this, &AResourceNode::OnRechargeComplete, RechargeTime, false);
+        }
+        return;
+    }
+
+    // ---- Disturbance roll.
+    const float Now = GetServerWorldTime();
+    if (Now - LastDisturbanceCheckTime >= DisturbanceCheckInterval)
+    {
+        LastDisturbanceCheckTime = Now;
+
+        const float Chance = FMath::Clamp(
+            BaseDisturbanceChance * CachedSampleData.InterruptionOddsMultiplier, 0.0f, 1.0f);
+
+        if (FMath::FRand() < Chance)
+        {
+            bAwaitingMiniGame = true;
+            MiniGameDeadline = Now + MiniGameWindowSeconds;
+
+            UE_LOG(LogTemp, Warning,
+                TEXT("ResourceNode '%s': disturbance triggered for '%s' — mini-game window %.2fs, deadline %.2f."),
+                *GetName(), *GetNameSafe(CurrentCollector), MiniGameWindowSeconds, MiniGameDeadline);
+
+            OnDisturbanceTriggered();
+            // OnDisturbanceTriggered also fires on clients via OnRep_AwaitingMiniGame.
         }
     }
 }
@@ -381,4 +455,20 @@ void AResourceNode::OnRep_Depleted()
     {
         OnRecharged();
     }
+}
+
+void AResourceNode::OnRep_AwaitingMiniGame()
+{
+    // Fire the disturbance event on clients when the mini-game becomes active.
+    if (bAwaitingMiniGame)
+    {
+        OnDisturbanceTriggered();
+    }
+}
+
+void AResourceNode::Multicast_BroadcastDisturbanceAlert_Implementation(FVector Location)
+{
+    // Fires on the server and every client that has this actor replicated.
+    // BP child handles the actual sound cue + particle.
+    OnDisturbanceAlert(Location);
 }
