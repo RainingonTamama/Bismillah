@@ -7,30 +7,91 @@
 #include "Components/CanvasPanelSlot.h"
 #include "GameFramework/PlayerController.h"
 
+// ---- DEBUG FLAG --------------------------------------------------------
+// Set to 0 when you're done diagnosing to silence the logs (or just remove
+// the UE_LOG lines entirely).
+#define DISTURBANCE_INDICATOR_DEBUG 1
+
+#if DISTURBANCE_INDICATOR_DEBUG
+#define DI_LOG(Format, ...) UE_LOG(LogTemp, Warning, TEXT("[DistIndicator] ") Format, ##__VA_ARGS__)
+#else
+#define DI_LOG(Format, ...) do {} while (0)
+#endif
+
 void UDisturbanceIndicatorWidget::NativeConstruct()
 {
     Super::NativeConstruct();
 
+    DI_LOG("NativeConstruct ran. Outer=%s", *GetNameSafe(GetOuter()));
+
     SetVisibility(ESlateVisibility::Hidden);
+
+    DI_LOG("NativeConstruct: RootCanvas=%s IndicatorVisual=%s",
+        RootCanvas ? *RootCanvas->GetName() : TEXT("NULL"),
+        IndicatorVisual ? *IndicatorVisual->GetName() : TEXT("NULL"));
 
     if (IndicatorVisual)
     {
         IndicatorVisual->SetRenderOpacity(1.0f);
 
-        // Force the canvas slot to be centered on the position we set, anchored to the
-        // top-left of the canvas. Without this, SetPosition refers to the widget's
-        // top-left corner instead of its center.
         if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(IndicatorVisual->Slot))
         {
             CanvasSlot->SetAnchors(FAnchors(0.0f, 0.0f));
             CanvasSlot->SetAlignment(FVector2D(0.5f, 0.5f));
             CanvasSlot->SetPosition(FVector2D(0.0f, 0.0f));
+
+            DI_LOG("NativeConstruct: applied anchors=(0,0) alignment=(0.5,0.5) pos=(0,0)");
+        }
+        else
+        {
+            DI_LOG("NativeConstruct: WARNING — IndicatorVisual's Slot is NOT a UCanvasPanelSlot. "
+                "Is IndicatorVisual actually a direct child of RootCanvas in the widget tree?");
         }
     }
 }
 
 void UDisturbanceIndicatorWidget::ShowIndicator(FVector WorldLocation)
 {
+    // (1) Entry point + world location
+    DI_LOG("ShowIndicator called. WorldLocation=%s", *WorldLocation.ToString());
+
+    // (6) Is the widget actually in the viewport?
+    DI_LOG("ShowIndicator: IsInViewport=%s SelfVis=%d",
+        IsInViewport() ? TEXT("true") : TEXT("false"),
+        (int32)GetVisibility());
+
+    // (5) Are the bound widgets valid?
+    DI_LOG("ShowIndicator: RootCanvas=%s IndicatorVisual=%s",
+        RootCanvas ? *RootCanvas->GetName() : TEXT("NULL"),
+        IndicatorVisual ? *IndicatorVisual->GetName() : TEXT("NULL"));
+
+    // (2) Owning player controller
+    APlayerController* PC = GetOwningPC();
+    DI_LOG("ShowIndicator: OwningPC=%s", PC ? *PC->GetName() : TEXT("NULL"));
+
+    if (PC)
+    {
+        DI_LOG("ShowIndicator: PC->IsLocalController=%s PC->PlayerCameraManager=%s",
+            PC->IsLocalController() ? TEXT("true") : TEXT("false"),
+            PC->PlayerCameraManager ? TEXT("valid") : TEXT("NULL"));
+
+        // (3) Projection test — do it here once for a quick sanity check
+        if (PC->PlayerCameraManager)
+        {
+            FVector2D Projected = FVector2D::ZeroVector;
+            const bool bOK = PC->ProjectWorldLocationToScreen(WorldLocation, Projected, /*bPlayerViewportRelative=*/true);
+            DI_LOG("ShowIndicator: projection bOK=%s Projected=(%.1f,%.1f)",
+                bOK ? TEXT("true") : TEXT("false"), Projected.X, Projected.Y);
+        }
+    }
+
+    // (4) Viewport size + scale
+    const FVector2D ViewportSize = UWidgetLayoutLibrary::GetViewportSize(this);
+    const float ViewportScale = UWidgetLayoutLibrary::GetViewportScale(this);
+    DI_LOG("ShowIndicator: ViewportSize=(%.1f,%.1f) ViewportScale=%.3f",
+        ViewportSize.X, ViewportSize.Y, ViewportScale);
+
+    // ---- Actual state change ----
     TargetWorldLocation = WorldLocation;
     RemainingTime = DisplayDuration;
     bActive = true;
@@ -40,12 +101,16 @@ void UDisturbanceIndicatorWidget::ShowIndicator(FVector WorldLocation)
         IndicatorVisual->SetRenderOpacity(1.0f);
     }
 
-    // HitTestInvisible: drawn, but does not block input to the game.
     SetVisibility(ESlateVisibility::HitTestInvisible);
+
+    DI_LOG("ShowIndicator: state applied. bActive=%s RemainingTime=%.2f SelfVis(after)=%d",
+        bActive ? TEXT("true") : TEXT("false"), RemainingTime, (int32)GetVisibility());
 }
 
 void UDisturbanceIndicatorWidget::HideIndicator()
 {
+    DI_LOG("HideIndicator called (bActive was %s)", bActive ? TEXT("true") : TEXT("false"));
+
     bActive = false;
     RemainingTime = 0.0f;
     SetVisibility(ESlateVisibility::Hidden);
@@ -72,7 +137,6 @@ void UDisturbanceIndicatorWidget::NativeTick(const FGeometry& MyGeometry, float 
         return;
     }
 
-    // Fade out over the last FadeOutDuration seconds.
     if (IndicatorVisual)
     {
         if (FadeOutDuration > 0.0f && RemainingTime < FadeOutDuration)
@@ -86,10 +150,41 @@ void UDisturbanceIndicatorWidget::NativeTick(const FGeometry& MyGeometry, float 
         }
     }
 
-    FVector2D ScreenPos;
-    if (ComputeScreenPosition(ScreenPos))
+    FVector2D ScreenPos = FVector2D::ZeroVector;
+    const bool bComputed = ComputeScreenPosition(ScreenPos);
+
+    if (bComputed)
     {
         ApplyVisualPosition(ScreenPos);
+    }
+
+    // Throttled per-frame logging: about 4 lines per second, so the log stays readable.
+    static float LastDiagLogTime = -1.0f;
+    const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+    if (Now - LastDiagLogTime >= 0.25f)
+    {
+        LastDiagLogTime = Now;
+
+        FVector2D SlotPos = FVector2D::ZeroVector;
+        if (IndicatorVisual)
+        {
+            // Renamed local from 'Slot' to 'VisualCanvasSlot' to avoid shadowing
+            // UWidget::Slot (which is a protected member of the base class).
+            if (const UCanvasPanelSlot* VisualCanvasSlot = Cast<UCanvasPanelSlot>(IndicatorVisual->Slot))
+            {
+                SlotPos = VisualCanvasSlot->GetPosition();
+            }
+        }
+
+        DI_LOG("Tick: Remaining=%.2f bComputed=%s ScreenTarget=(%.1f,%.1f) SlotPos=(%.1f,%.1f) "
+            "VisualVis=%d SelfVis=%d Opacity=%.2f",
+            RemainingTime,
+            bComputed ? TEXT("true") : TEXT("false"),
+            ScreenPos.X, ScreenPos.Y,
+            SlotPos.X, SlotPos.Y,
+            IndicatorVisual ? (int32)IndicatorVisual->GetVisibility() : -1,
+            (int32)GetVisibility(),
+            IndicatorVisual ? IndicatorVisual->GetRenderOpacity() : -1.0f);
     }
 }
 
@@ -126,11 +221,10 @@ bool UDisturbanceIndicatorWidget::ComputeScreenPosition(FVector2D& OutScreenPosi
     const float Margin = ScreenMargin;
     const float BottomY = ViewportSize.Y - Margin;
 
-    // ---- Case 1: target is in front of the camera -> exact screen projection. ----
     if (ForwardDot > 0.0f)
     {
         FVector2D Projected;
-        const bool bProjected = PC->ProjectWorldLocationToScreen(TargetWorldLocation, Projected, /*bPlayerViewportRelative=*/true);
+        const bool bProjected = PC->ProjectWorldLocationToScreen(TargetWorldLocation, Projected, true);
         if (!bProjected)
         {
             Projected = FVector2D(ViewportSize.X * 0.5f, ViewportSize.Y * 0.5f);
@@ -141,26 +235,7 @@ bool UDisturbanceIndicatorWidget::ComputeScreenPosition(FVector2D& OutScreenPosi
         return true;
     }
 
-    // ---- Case 2: target is behind the camera -> clamp to BOTTOM edge. ----
-    //
-    // Horizontal bearing relative to camera forward:
-    //    0°   = dead ahead
-    //   90°   = directly right
-    //  180°   = directly behind
-    //  -90°   = directly left
-    // -180°   = directly behind (wraps)
-    //
-    // sin(bearing) gives a smooth X across the bottom:
-    //    90°   -> sin = +1  -> bottom-right area
-    //   180°   -> sin =  0  -> bottom-center
-    //   -90°   -> sin = -1  -> bottom-left area
-    //  -180°   -> sin =  0  -> bottom-center
-    //
-    // Because the entire "behind" branch covers bearings with |angle| > 90°, the X
-    // varies smoothly as the killer rotates; the discontinuity only occurs at the
-    // 90° boundary itself, where the indicator jumps from the bottom edge up to the
-    // in-front projected position. That jump is intentional per design.
-    const float Bearing = FMath::Atan2(RightDot, ForwardDot); // radians, (-pi, pi]
+    const float Bearing = FMath::Atan2(RightDot, ForwardDot);
     const float SinBearing = FMath::Sin(Bearing);
 
     const float UsableWidth = ViewportSize.X - 2.0f * Margin;
