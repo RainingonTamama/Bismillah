@@ -8,8 +8,7 @@
 #include "GameFramework/PlayerController.h"
 
 // ---- DEBUG FLAG --------------------------------------------------------
-// Set to 0 when you're done diagnosing to silence the logs (or just remove
-// the UE_LOG lines entirely).
+// Set to 0 when you're done diagnosing to silence the log line.
 #define DISTURBANCE_INDICATOR_DEBUG 1
 
 #if DISTURBANCE_INDICATOR_DEBUG
@@ -22,76 +21,27 @@ void UDisturbanceIndicatorWidget::NativeConstruct()
 {
     Super::NativeConstruct();
 
-    DI_LOG("NativeConstruct ran. Outer=%s", *GetNameSafe(GetOuter()));
-
     SetVisibility(ESlateVisibility::Hidden);
 
-    DI_LOG("NativeConstruct: RootCanvas=%s IndicatorVisual=%s",
-        RootCanvas ? *RootCanvas->GetName() : TEXT("NULL"),
-        IndicatorVisual ? *IndicatorVisual->GetName() : TEXT("NULL"));
-
+    // Force the canvas slot to be centered on the position we set, anchored to the
+    // top-left of the canvas. This makes SetPosition refer to the visual's center
+    // (in Slate units) rather than its top-left corner, and makes the result
+    // independent of whatever anchors/alignment the Designer set.
     if (IndicatorVisual)
     {
         IndicatorVisual->SetRenderOpacity(1.0f);
 
         if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(IndicatorVisual->Slot))
         {
-            CanvasSlot->SetAnchors(FAnchors(0.0f, 0.0f));
+            CanvasSlot->SetAnchors(FAnchors(0.0f, 0.0f, 0.0f, 0.0f));
             CanvasSlot->SetAlignment(FVector2D(0.5f, 0.5f));
             CanvasSlot->SetPosition(FVector2D(0.0f, 0.0f));
-
-            DI_LOG("NativeConstruct: applied anchors=(0,0) alignment=(0.5,0.5) pos=(0,0)");
-        }
-        else
-        {
-            DI_LOG("NativeConstruct: WARNING — IndicatorVisual's Slot is NOT a UCanvasPanelSlot. "
-                "Is IndicatorVisual actually a direct child of RootCanvas in the widget tree?");
         }
     }
 }
 
 void UDisturbanceIndicatorWidget::ShowIndicator(FVector WorldLocation)
 {
-    // (1) Entry point + world location
-    DI_LOG("ShowIndicator called. WorldLocation=%s", *WorldLocation.ToString());
-
-    // (6) Is the widget actually in the viewport?
-    DI_LOG("ShowIndicator: IsInViewport=%s SelfVis=%d",
-        IsInViewport() ? TEXT("true") : TEXT("false"),
-        (int32)GetVisibility());
-
-    // (5) Are the bound widgets valid?
-    DI_LOG("ShowIndicator: RootCanvas=%s IndicatorVisual=%s",
-        RootCanvas ? *RootCanvas->GetName() : TEXT("NULL"),
-        IndicatorVisual ? *IndicatorVisual->GetName() : TEXT("NULL"));
-
-    // (2) Owning player controller
-    APlayerController* PC = GetOwningPC();
-    DI_LOG("ShowIndicator: OwningPC=%s", PC ? *PC->GetName() : TEXT("NULL"));
-
-    if (PC)
-    {
-        DI_LOG("ShowIndicator: PC->IsLocalController=%s PC->PlayerCameraManager=%s",
-            PC->IsLocalController() ? TEXT("true") : TEXT("false"),
-            PC->PlayerCameraManager ? TEXT("valid") : TEXT("NULL"));
-
-        // (3) Projection test — do it here once for a quick sanity check
-        if (PC->PlayerCameraManager)
-        {
-            FVector2D Projected = FVector2D::ZeroVector;
-            const bool bOK = PC->ProjectWorldLocationToScreen(WorldLocation, Projected, /*bPlayerViewportRelative=*/true);
-            DI_LOG("ShowIndicator: projection bOK=%s Projected=(%.1f,%.1f)",
-                bOK ? TEXT("true") : TEXT("false"), Projected.X, Projected.Y);
-        }
-    }
-
-    // (4) Viewport size + scale
-    const FVector2D ViewportSize = UWidgetLayoutLibrary::GetViewportSize(this);
-    const float ViewportScale = UWidgetLayoutLibrary::GetViewportScale(this);
-    DI_LOG("ShowIndicator: ViewportSize=(%.1f,%.1f) ViewportScale=%.3f",
-        ViewportSize.X, ViewportSize.Y, ViewportScale);
-
-    // ---- Actual state change ----
     TargetWorldLocation = WorldLocation;
     RemainingTime = DisplayDuration;
     bActive = true;
@@ -101,16 +51,12 @@ void UDisturbanceIndicatorWidget::ShowIndicator(FVector WorldLocation)
         IndicatorVisual->SetRenderOpacity(1.0f);
     }
 
+    // HitTestInvisible: drawn, but does not block input to the game.
     SetVisibility(ESlateVisibility::HitTestInvisible);
-
-    DI_LOG("ShowIndicator: state applied. bActive=%s RemainingTime=%.2f SelfVis(after)=%d",
-        bActive ? TEXT("true") : TEXT("false"), RemainingTime, (int32)GetVisibility());
 }
 
 void UDisturbanceIndicatorWidget::HideIndicator()
 {
-    DI_LOG("HideIndicator called (bActive was %s)", bActive ? TEXT("true") : TEXT("false"));
-
     bActive = false;
     RemainingTime = 0.0f;
     SetVisibility(ESlateVisibility::Hidden);
@@ -119,6 +65,27 @@ void UDisturbanceIndicatorWidget::HideIndicator()
 APlayerController* UDisturbanceIndicatorWidget::GetOwningPC() const
 {
     return GetOwningPlayer();
+}
+
+FVector2D UDisturbanceIndicatorWidget::GetCanvasLocalSize() const
+{
+    if (RootCanvas)
+    {
+        const FVector2D LocalSize = RootCanvas->GetCachedGeometry().GetLocalSize();
+        if (LocalSize.X > 1.0f && LocalSize.Y > 1.0f)
+        {
+            return LocalSize;
+        }
+    }
+
+    // Fallback: viewport size is in pixels; divide by DPI scale to get Slate units.
+    const FVector2D ViewportSizePixels = UWidgetLayoutLibrary::GetViewportSize(this);
+    const float ViewportScale = UWidgetLayoutLibrary::GetViewportScale(this);
+    if (ViewportScale > KINDA_SMALL_NUMBER)
+    {
+        return ViewportSizePixels / ViewportScale;
+    }
+    return ViewportSizePixels;
 }
 
 void UDisturbanceIndicatorWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
@@ -137,6 +104,7 @@ void UDisturbanceIndicatorWidget::NativeTick(const FGeometry& MyGeometry, float 
         return;
     }
 
+    // Fade out over the last FadeOutDuration seconds.
     if (IndicatorVisual)
     {
         if (FadeOutDuration > 0.0f && RemainingTime < FadeOutDuration)
@@ -150,103 +118,141 @@ void UDisturbanceIndicatorWidget::NativeTick(const FGeometry& MyGeometry, float 
         }
     }
 
-    FVector2D ScreenPos = FVector2D::ZeroVector;
-    const bool bComputed = ComputeScreenPosition(ScreenPos);
-
-    if (bComputed)
+    FVector2D LocalPosition = FVector2D::ZeroVector;
+    if (ComputeScreenPosition(LocalPosition))
     {
-        ApplyVisualPosition(ScreenPos);
+        ApplyVisualPosition(LocalPosition);
     }
 
-    // Throttled per-frame logging: about 4 lines per second, so the log stays readable.
-    static float LastDiagLogTime = -1.0f;
+    // Debug log, throttled to ~4 lines/sec so the Output Log stays readable.
+    static float LastLogTime = -1.0f;
     const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
-    if (Now - LastDiagLogTime >= 0.25f)
+    if (Now - LastLogTime >= 0.25f)
     {
-        LastDiagLogTime = Now;
+        LastLogTime = Now;
 
-        FVector2D SlotPos = FVector2D::ZeroVector;
-        if (IndicatorVisual)
-        {
-            // Renamed local from 'Slot' to 'VisualCanvasSlot' to avoid shadowing
-            // UWidget::Slot (which is a protected member of the base class).
-            if (const UCanvasPanelSlot* VisualCanvasSlot = Cast<UCanvasPanelSlot>(IndicatorVisual->Slot))
-            {
-                SlotPos = VisualCanvasSlot->GetPosition();
-            }
-        }
+        const FVector2D LocalSize = GetCanvasLocalSize();
+        const float ViewportScale = UWidgetLayoutLibrary::GetViewportScale(this);
 
-        DI_LOG("Tick: Remaining=%.2f bComputed=%s ScreenTarget=(%.1f,%.1f) SlotPos=(%.1f,%.1f) "
-            "VisualVis=%d SelfVis=%d Opacity=%.2f",
-            RemainingTime,
-            bComputed ? TEXT("true") : TEXT("false"),
-            ScreenPos.X, ScreenPos.Y,
-            SlotPos.X, SlotPos.Y,
-            IndicatorVisual ? (int32)IndicatorVisual->GetVisibility() : -1,
-            (int32)GetVisibility(),
-            IndicatorVisual ? IndicatorVisual->GetRenderOpacity() : -1.0f);
+        DI_LOG("LocalSize=(%.1f,%.1f) ViewportScale=%.2f TargetWorldLoc=%s FinalPos=(%.1f,%.1f)",
+            LocalSize.X, LocalSize.Y,
+            ViewportScale,
+            *TargetWorldLocation.ToString(),
+            LocalPosition.X, LocalPosition.Y);
     }
 }
 
-bool UDisturbanceIndicatorWidget::ComputeScreenPosition(FVector2D& OutScreenPosition) const
+bool UDisturbanceIndicatorWidget::ComputeScreenPosition(FVector2D& OutLocalPosition) const
 {
     APlayerController* PC = GetOwningPC();
-    if (!PC)
+    if (!PC || !PC->PlayerCameraManager)
     {
         return false;
     }
 
-    APlayerCameraManager* CamMgr = PC->PlayerCameraManager;
-    if (!CamMgr)
+    const FVector2D LocalSize = GetCanvasLocalSize();
+    if (LocalSize.X < 1.0f || LocalSize.Y < 1.0f)
     {
         return false;
     }
 
-    const FVector CamLocation = CamMgr->GetCameraLocation();
-    const FRotator CamRotation = CamMgr->GetCameraRotation();
+    const FVector CamLocation = PC->PlayerCameraManager->GetCameraLocation();
+    const FRotator CamRotation = PC->PlayerCameraManager->GetCameraRotation();
 
     const FVector Forward = CamRotation.Vector();
-    const FVector Right = FRotationMatrix(CamRotation).GetScaledAxis(EAxis::Y);
+    const FRotationMatrix CamMatrix(CamRotation);
+    const FVector Right = CamMatrix.GetScaledAxis(EAxis::Y);
+    const FVector Up = CamMatrix.GetScaledAxis(EAxis::Z);
 
     const FVector ToTarget = TargetWorldLocation - CamLocation;
     const float ForwardDot = FVector::DotProduct(ToTarget, Forward);
     const float RightDot = FVector::DotProduct(ToTarget, Right);
-
-    const FVector2D ViewportSize = UWidgetLayoutLibrary::GetViewportSize(this);
-    if (ViewportSize.X <= 0.0f || ViewportSize.Y <= 0.0f)
-    {
-        return false;
-    }
+    const float UpDot = FVector::DotProduct(ToTarget, Up);
 
     const float Margin = ScreenMargin;
-    const float BottomY = ViewportSize.Y - Margin;
+    const float CenterX = LocalSize.X * 0.5f;
+    const float CenterY = LocalSize.Y * 0.5f;
 
+    // ---- Case 1: target in front of the camera. ----
     if (ForwardDot > 0.0f)
     {
-        FVector2D Projected;
-        const bool bProjected = PC->ProjectWorldLocationToScreen(TargetWorldLocation, Projected, true);
-        if (!bProjected)
+        // Try the real projection. This returns Slate units (widget-local, DPI-aware),
+        // so it's directly comparable to LocalSize.
+        FVector2D ProjectedLocal = FVector2D::ZeroVector;
+        const bool bProjected = UWidgetLayoutLibrary::ProjectWorldLocationToWidgetPosition(
+            PC, TargetWorldLocation, ProjectedLocal, /*bPlayerViewportRelative=*/false);
+
+        if (bProjected)
         {
-            Projected = FVector2D(ViewportSize.X * 0.5f, ViewportSize.Y * 0.5f);
+            const bool bOnScreen =
+                ProjectedLocal.X >= 0.0f && ProjectedLocal.X <= LocalSize.X &&
+                ProjectedLocal.Y >= 0.0f && ProjectedLocal.Y <= LocalSize.Y;
+
+            if (bOnScreen)
+            {
+                OutLocalPosition.X = FMath::Clamp(ProjectedLocal.X, Margin, LocalSize.X - Margin);
+                OutLocalPosition.Y = FMath::Clamp(ProjectedLocal.Y, Margin, LocalSize.Y - Margin);
+                return true;
+            }
         }
 
-        OutScreenPosition.X = FMath::Clamp(Projected.X, Margin, ViewportSize.X - Margin);
-        OutScreenPosition.Y = FMath::Clamp(Projected.Y, Margin, ViewportSize.Y - Margin);
+        // In front but off-screen: clamp to the nearest edge along the target's
+        // screen-space direction (RightDot on X, negative UpDot on Y because screen
+        // Y grows downward while camera Up grows upward).
+        float DirX = RightDot;
+        float DirY = -UpDot;
+        const float DirLen = FMath::Sqrt(DirX * DirX + DirY * DirY);
+        if (DirLen > KINDA_SMALL_NUMBER)
+        {
+            DirX /= DirLen;
+            DirY /= DirLen;
+
+            // Half-extents of the inscribed rectangle (screen minus margins).
+            const float HalfW = CenterX - Margin;
+            const float HalfH = CenterY - Margin;
+
+            // Find how far along (DirX, DirY) we can go before hitting an edge.
+            const float ScaleX = (FMath::Abs(DirX) > KINDA_SMALL_NUMBER) ? HalfW / FMath::Abs(DirX) : TNumericLimits<float>::Max();
+            const float ScaleY = (FMath::Abs(DirY) > KINDA_SMALL_NUMBER) ? HalfH / FMath::Abs(DirY) : TNumericLimits<float>::Max();
+            const float Scale = FMath::Min(ScaleX, ScaleY);
+
+            OutLocalPosition.X = CenterX + DirX * Scale;
+            OutLocalPosition.Y = CenterY + DirY * Scale;
+            return true;
+        }
+
+        // Degenerate: target is straight ahead but off-screen (rare). Bottom center.
+        OutLocalPosition.X = CenterX;
+        OutLocalPosition.Y = LocalSize.Y - Margin;
         return true;
     }
 
+    // ---- Case 2: target behind the camera. Bottom edge, X based on bearing. ----
+    //
+    // Bearing is the angle of the target in camera space, measured from Forward:
+    //    0°   = dead ahead
+    //   90°   = directly right
+    //  180°   = directly behind
+    //  -90°   = directly left
+    // -180°   = directly behind (wrap)
+    //
+    // sin(bearing) maps to X across the bottom:
+    //    90°   -> +1 -> bottom-right area
+    //   180°   ->  0 -> bottom-center
+    //   -90°   -> -1 -> bottom-left area
+    //  -180°   ->  0 -> bottom-center
     const float Bearing = FMath::Atan2(RightDot, ForwardDot);
     const float SinBearing = FMath::Sin(Bearing);
 
-    const float UsableWidth = ViewportSize.X - 2.0f * Margin;
-    const float ScreenX = Margin + ((SinBearing + 1.0f) * 0.5f) * UsableWidth;
+    const float UsableWidth = LocalSize.X - 2.0f * Margin;
+    OutLocalPosition.X = Margin + ((SinBearing + 1.0f) * 0.5f) * UsableWidth;
 
-    OutScreenPosition.X = ScreenX;
-    OutScreenPosition.Y = BottomY;
+    // Exact bottom edge, respecting the margin.
+    OutLocalPosition.Y = LocalSize.Y - Margin;
     return true;
 }
 
-void UDisturbanceIndicatorWidget::ApplyVisualPosition(const FVector2D& ScreenPosition)
+void UDisturbanceIndicatorWidget::ApplyVisualPosition(const FVector2D& LocalPosition)
 {
     if (!IndicatorVisual)
     {
@@ -255,6 +261,6 @@ void UDisturbanceIndicatorWidget::ApplyVisualPosition(const FVector2D& ScreenPos
 
     if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(IndicatorVisual->Slot))
     {
-        CanvasSlot->SetPosition(ScreenPosition);
+        CanvasSlot->SetPosition(LocalPosition);
     }
 }
