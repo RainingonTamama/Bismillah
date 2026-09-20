@@ -21,16 +21,10 @@ void UDisturbanceIndicatorWidget::NativeConstruct()
 {
     Super::NativeConstruct();
 
-    SetVisibility(ESlateVisibility::Hidden);
-
-    // Force the canvas slot to be centered on the position we set, anchored to the
-    // top-left of the canvas. This makes SetPosition refer to the visual's center
-    // (in Slate units) rather than its top-left corner, and makes the result
-    // independent of whatever anchors/alignment the Designer set.
+    // Configure IndicatorVisual's slot exactly once. Result is independent of any
+    // anchors/alignment the designer set in the BP.
     if (IndicatorVisual)
     {
-        IndicatorVisual->SetRenderOpacity(1.0f);
-
         if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(IndicatorVisual->Slot))
         {
             CanvasSlot->SetAnchors(FAnchors(0.0f, 0.0f, 0.0f, 0.0f));
@@ -38,6 +32,26 @@ void UDisturbanceIndicatorWidget::NativeConstruct()
             CanvasSlot->SetPosition(FVector2D(0.0f, 0.0f));
         }
     }
+
+    // Fully hidden by default. See EnterHiddenState for why this is more than just
+    // hiding the outer UserWidget.
+    EnterHiddenState();
+}
+
+void UDisturbanceIndicatorWidget::EnterHiddenState()
+{
+    bActive = false;
+    RemainingTime = 0.0f;
+
+    if (IndicatorVisual)
+    {
+        IndicatorVisual->SetVisibility(ESlateVisibility::Collapsed);
+        IndicatorVisual->SetRenderOpacity(1.0f); // reset for next show
+    }
+
+    // Keep the outer widget hidden too (defensive; also prevents the UserWidget's
+    // own slot from intercepting input).
+    SetVisibility(ESlateVisibility::Hidden);
 }
 
 void UDisturbanceIndicatorWidget::ShowIndicator(FVector WorldLocation)
@@ -46,20 +60,20 @@ void UDisturbanceIndicatorWidget::ShowIndicator(FVector WorldLocation)
     RemainingTime = DisplayDuration;
     bActive = true;
 
-    if (IndicatorVisual)
-    {
-        IndicatorVisual->SetRenderOpacity(1.0f);
-    }
-
+    // Show the outer widget, then the visual, then reset opacity.
     // HitTestInvisible: drawn, but does not block input to the game.
     SetVisibility(ESlateVisibility::HitTestInvisible);
+
+    if (IndicatorVisual)
+    {
+        IndicatorVisual->SetVisibility(ESlateVisibility::Visible);
+        IndicatorVisual->SetRenderOpacity(1.0f);
+    }
 }
 
 void UDisturbanceIndicatorWidget::HideIndicator()
 {
-    bActive = false;
-    RemainingTime = 0.0f;
-    SetVisibility(ESlateVisibility::Hidden);
+    EnterHiddenState();
 }
 
 APlayerController* UDisturbanceIndicatorWidget::GetOwningPC() const
@@ -176,8 +190,6 @@ bool UDisturbanceIndicatorWidget::ComputeScreenPosition(FVector2D& OutLocalPosit
     // ---- Case 1: target in front of the camera. ----
     if (ForwardDot > 0.0f)
     {
-        // Try the real projection. This returns Slate units (widget-local, DPI-aware),
-        // so it's directly comparable to LocalSize.
         FVector2D ProjectedLocal = FVector2D::ZeroVector;
         const bool bProjected = UWidgetLayoutLibrary::ProjectWorldLocationToWidgetPosition(
             PC, TargetWorldLocation, ProjectedLocal, /*bPlayerViewportRelative=*/false);
@@ -196,9 +208,7 @@ bool UDisturbanceIndicatorWidget::ComputeScreenPosition(FVector2D& OutLocalPosit
             }
         }
 
-        // In front but off-screen: clamp to the nearest edge along the target's
-        // screen-space direction (RightDot on X, negative UpDot on Y because screen
-        // Y grows downward while camera Up grows upward).
+        // In front but off-screen: clamp along the target's screen direction.
         float DirX = RightDot;
         float DirY = -UpDot;
         const float DirLen = FMath::Sqrt(DirX * DirX + DirY * DirY);
@@ -207,11 +217,9 @@ bool UDisturbanceIndicatorWidget::ComputeScreenPosition(FVector2D& OutLocalPosit
             DirX /= DirLen;
             DirY /= DirLen;
 
-            // Half-extents of the inscribed rectangle (screen minus margins).
             const float HalfW = CenterX - Margin;
             const float HalfH = CenterY - Margin;
 
-            // Find how far along (DirX, DirY) we can go before hitting an edge.
             const float ScaleX = (FMath::Abs(DirX) > KINDA_SMALL_NUMBER) ? HalfW / FMath::Abs(DirX) : TNumericLimits<float>::Max();
             const float ScaleY = (FMath::Abs(DirY) > KINDA_SMALL_NUMBER) ? HalfH / FMath::Abs(DirY) : TNumericLimits<float>::Max();
             const float Scale = FMath::Min(ScaleX, ScaleY);
@@ -221,33 +229,18 @@ bool UDisturbanceIndicatorWidget::ComputeScreenPosition(FVector2D& OutLocalPosit
             return true;
         }
 
-        // Degenerate: target is straight ahead but off-screen (rare). Bottom center.
+        // Degenerate: straight ahead but off-screen. Bottom center.
         OutLocalPosition.X = CenterX;
         OutLocalPosition.Y = LocalSize.Y - Margin;
         return true;
     }
 
-    // ---- Case 2: target behind the camera. Bottom edge, X based on bearing. ----
-    //
-    // Bearing is the angle of the target in camera space, measured from Forward:
-    //    0°   = dead ahead
-    //   90°   = directly right
-    //  180°   = directly behind
-    //  -90°   = directly left
-    // -180°   = directly behind (wrap)
-    //
-    // sin(bearing) maps to X across the bottom:
-    //    90°   -> +1 -> bottom-right area
-    //   180°   ->  0 -> bottom-center
-    //   -90°   -> -1 -> bottom-left area
-    //  -180°   ->  0 -> bottom-center
+    // ---- Case 2: target behind the camera. Bottom edge, X from bearing. ----
     const float Bearing = FMath::Atan2(RightDot, ForwardDot);
     const float SinBearing = FMath::Sin(Bearing);
 
     const float UsableWidth = LocalSize.X - 2.0f * Margin;
     OutLocalPosition.X = Margin + ((SinBearing + 1.0f) * 0.5f) * UsableWidth;
-
-    // Exact bottom edge, respecting the margin.
     OutLocalPosition.Y = LocalSize.Y - Margin;
     return true;
 }
