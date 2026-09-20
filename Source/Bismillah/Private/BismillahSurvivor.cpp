@@ -96,6 +96,34 @@ void ABismillahSurvivor::OnRep_CurrentCollectingNode()
     OnCollectingNodeChanged(CurrentCollectingNode);
 }
 
+// ---------------- Cancellation ----------------
+
+bool ABismillahSurvivor::CancelCollection(const FString& Reason)
+{
+    if (!HasAuthority())
+    {
+        return false;
+    }
+
+    if (!CurrentCollectingNode)
+    {
+        return false;
+    }
+
+    UE_LOG(LogTemp, Warning,
+        TEXT("CancelCollection: '%s' cancelling '%s' (reason: %s)"),
+        *GetName(), *CurrentCollectingNode->GetName(), *Reason);
+
+    CurrentCollectingNode->StopCollection(true);
+    SetCurrentCollectingNode(nullptr);
+    return true;
+}
+
+void ABismillahSurvivor::Server_CancelCollection_Implementation()
+{
+    CancelCollection(TEXT("player requested"));
+}
+
 // ---------------- Movement cancel ----------------
 
 void ABismillahSurvivor::OnMoveInputForCollection(const FInputActionValue& Value)
@@ -116,20 +144,6 @@ void ABismillahSurvivor::OnMoveInputForCollection(const FInputActionValue& Value
         *GetName(), *CurrentCollectingNode->GetName());
 
     Server_CancelCollection();
-}
-
-void ABismillahSurvivor::Server_CancelCollection_Implementation()
-{
-    if (!CurrentCollectingNode)
-    {
-        return;
-    }
-
-    UE_LOG(LogTemp, Warning, TEXT("Server_CancelCollection: cancelling collection of '%s' for '%s'."),
-        *CurrentCollectingNode->GetName(), *GetName());
-
-    CurrentCollectingNode->StopCollection(true);
-    SetCurrentCollectingNode(nullptr);
 }
 
 // ---------------- Server validation ----------------
@@ -157,8 +171,7 @@ void ABismillahSurvivor::ServerValidateCollection()
             TEXT("ServerValidateCollection: '%s' is moving (v^2=%.1f) while collecting '%s', cancelling."),
             *GetName(), HorizVelocitySq, *CurrentCollectingNode->GetName());
 
-        CurrentCollectingNode->StopCollection(true);
-        SetCurrentCollectingNode(nullptr);
+        CancelCollection(TEXT("moved while collecting"));
         return;
     }
 
@@ -175,8 +188,7 @@ void ABismillahSurvivor::ServerValidateCollection()
             TEXT("ServerValidateCollection: '%s' moved out of range of '%s' (dist^2=%.0f, max^2=%.0f), cancelling."),
             *GetName(), *CurrentCollectingNode->GetName(), DistSq, FMath::Square(MaxDist));
 
-        CurrentCollectingNode->StopCollection(true);
-        SetCurrentCollectingNode(nullptr);
+        CancelCollection(TEXT("moved out of range"));
     }
 }
 
@@ -242,8 +254,8 @@ void ABismillahSurvivor::TryInteract()
         return;
     }
 
-    // ---- Mini-game routing: if a mini-game is active on the node we're collecting,
-    //      this press resolves it instead of interacting.
+    // Mini-game routing: if a mini-game is active on the node we're collecting,
+    // this press resolves it instead of interacting.
     if (CurrentCollectingNode && CurrentCollectingNode->IsAwaitingMiniGame())
     {
         UE_LOG(LogTemp, Warning, TEXT("TryInteract: routing to Server_NotifyMiniGamePress (mini-game active)."));
@@ -348,7 +360,6 @@ void ABismillahSurvivor::Server_NotifyMiniGamePress_Implementation()
     UE_LOG(LogTemp, Warning, TEXT("Server_NotifyMiniGamePress: forwarding to node '%s' for resolution."),
         *CurrentCollectingNode->GetName());
 
-    // The node decides success vs. failure based on server time vs. its deadline.
     CurrentCollectingNode->ResolveMiniGame();
 }
 
@@ -371,8 +382,7 @@ void ABismillahSurvivor::Server_Interact_Implementation(AInteractableBase* Targe
         UE_LOG(LogTemp, Warning, TEXT("Server_Interact: switching from '%s' to '%s'"),
             *CurrentCollectingNode->GetName(), *Target->GetName());
 
-        CurrentCollectingNode->StopCollection(true);
-        SetCurrentCollectingNode(nullptr);
+        CancelCollection(TEXT("switched to a different interactable"));
     }
 
     UE_LOG(LogTemp, Warning, TEXT("Server_Interact: executing OnInteract on '%s' for '%s'"),

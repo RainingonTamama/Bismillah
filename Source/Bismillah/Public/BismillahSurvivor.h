@@ -83,6 +83,15 @@ public:
     UFUNCTION(BlueprintImplementableEvent, Category = "Interaction")
     void OnCollectingNodeChanged(AResourceNode* NewNode);
 
+    /**
+     * Server-only. Cancels any in-progress collection (progress resets to 0).
+     * Called by the survivor's own input path (player moved) and by external
+     * systems (killer melee, future game logic).
+     * @return true if a collection was actually in progress and got cancelled.
+     */
+    UFUNCTION(BlueprintCallable, Category = "Interaction")
+    bool CancelCollection(const FString& Reason);
+
 protected:
     UFUNCTION()
     void OnRep_CurrentHealth();
@@ -98,10 +107,6 @@ protected:
     UFUNCTION(Server, Reliable)
     void Server_Interact(AInteractableBase* Target);
 
-    /**
-     * Sent when the player presses Interact while a mini-game is active on the
-     * node they're collecting. Server validates timing internally.
-     */
     UFUNCTION(Server, Reliable)
     void Server_NotifyMiniGamePress();
 
