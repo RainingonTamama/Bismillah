@@ -19,31 +19,46 @@ struct FSampleData : public FTableRowBase
 {
     GENERATED_BODY()
 
-    /** Unique identifier for this sample. Matched against AResourceNode::SampleID. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sample")
     FName SampleID;
 
-    /** Player-facing name shown in UI. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sample")
     FText DisplayName;
 
-    /** Rarity tier of the sample. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sample")
     ESampleRarity Rarity = ESampleRarity::Common;
 
-    /** Contribution toward the future ARC deposit threshold. Stored only for now. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sample")
     int32 ResearchValue = 0;
 
-    /** Seconds required to fully collect this node. Set to 20.0 for the Rock. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sample")
     float BaseCollectionTime = 20.0f;
 
-    /** Scales disturbance chance in the future interruption system. Stored only for now. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sample")
     float InterruptionOddsMultiplier = 1.0f;
 
-    /** Seconds the node stays depleted after being fully collected. Set to 80.0 for the Rock. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sample")
     float RechargeTime = 80.0f;
+};
+
+/**
+ * A sample currently held by a survivor.
+ * SampleID == NAME_None means no sample is being carried.
+ */
+USTRUCT(BlueprintType)
+struct FCarriedSample
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly, Category = "Sample")
+    FName SampleID;
+
+    UPROPERTY(BlueprintReadOnly, Category = "Sample")
+    FText DisplayName;
+
+    UPROPERTY(BlueprintReadOnly, Category = "Sample")
+    int32 ResearchValue = 0;
+
+    bool IsValid() const { return !SampleID.IsNone(); }
+    void Reset() { SampleID = NAME_None; DisplayName = FText::GetEmpty(); ResearchValue = 0; }
 };

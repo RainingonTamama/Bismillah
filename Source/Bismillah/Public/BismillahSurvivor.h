@@ -4,11 +4,13 @@
 
 #include "CoreMinimal.h"
 #include "BismillahCharacter.h"
+#include "Core/Enums/SampleTypes.h"
 #include "BismillahSurvivor.generated.h"
 
 class UInputAction;
 class AInteractableBase;
 class AResourceNode;
+class ATRGBag;
 struct FInputActionValue;
 
 UENUM(BlueprintType)
@@ -56,7 +58,7 @@ public:
 
     virtual float TakeDamage(float DamageAmount, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 
-    // ---- Interaction input --------------------------------------------------
+    // ---- Input --------------------------------------------------------------
 
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
     UInputAction* InteractAction;
@@ -64,18 +66,32 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Interaction")
     float InteractionCheckRadius = 200.0f;
 
-    // ---- Collection tracking ------------------------------------------------
+    // ---- Active interaction tracking ----------------------------------------
 
-    /**
-     * The node this survivor is currently collecting, or null.
-     * Replicated so client UI can bind a progress bar to that specific node.
-     *
-     * DO NOT assign this directly from C++. Always call SetCurrentCollectingNode()
-     * so the OnCollectingNodeChanged event fires correctly on BOTH the authority
-     * (listen server) and clients. The authority does not receive OnRep callbacks.
-     */
     UPROPERTY(ReplicatedUsing = OnRep_CurrentCollectingNode, BlueprintReadOnly, Category = "Interaction")
     TObjectPtr<AResourceNode> CurrentCollectingNode = nullptr;
+
+    UPROPERTY(ReplicatedUsing = OnRep_CurrentDepositBag, BlueprintReadOnly, Category = "Interaction")
+    TObjectPtr<ATRGBag> CurrentDepositBag = nullptr;
+
+    // ---- Carried sample -----------------------------------------------------
+
+    UPROPERTY(ReplicatedUsing = OnRep_CarriedSample, BlueprintReadOnly, Category = "Sample")
+    FCarriedSample CarriedSample;
+
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Sample")
+    bool IsCarryingSample() const { return CarriedSample.IsValid(); }
+
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Sample")
+    FCarriedSample GetCarriedSample() const { return CarriedSample; }
+
+    UFUNCTION(BlueprintCallable, Category = "Sample")
+    bool GiveSample(const FSampleData& SampleData);
+
+    UFUNCTION(BlueprintCallable, Category = "Sample")
+    void ClearSample();
+
+    // ---- BP events ----------------------------------------------------------
 
     UFUNCTION(BlueprintImplementableEvent, Category = "Interaction")
     void OnDisturbanceWhileCollecting(AResourceNode* Node);
@@ -83,14 +99,25 @@ public:
     UFUNCTION(BlueprintImplementableEvent, Category = "Interaction")
     void OnCollectingNodeChanged(AResourceNode* NewNode);
 
-    /**
-     * Server-only. Cancels any in-progress collection (progress resets to 0).
-     * Called by the survivor's own input path (player moved) and by external
-     * systems (killer melee, future game logic).
-     * @return true if a collection was actually in progress and got cancelled.
-     */
+    UFUNCTION(BlueprintImplementableEvent, Category = "Interaction")
+    void OnDepositBagChanged(ATRGBag* NewBag);
+
+    // NOTE: FText is passed by const-ref here, matching what UHT generates for
+    // BlueprintImplementableEvent parameters of that type. Passing it by value
+    // (FText DisplayName) causes a "overloaded member function not found" build error.
+    UFUNCTION(BlueprintImplementableEvent, Category = "Sample")
+    void OnCarriedSampleChanged(FName SampleID, const FText& DisplayName, int32 ResearchValue);
+
+    // ---- Public server API --------------------------------------------------
+
     UFUNCTION(BlueprintCallable, Category = "Interaction")
-    bool CancelCollection(const FString& Reason);
+    bool CancelActiveInteraction(const FString& Reason);
+
+    UFUNCTION(BlueprintCallable, Category = "Interaction")
+    void SetCurrentCollectingNode(AResourceNode* NewNode);
+
+    UFUNCTION(BlueprintCallable, Category = "Interaction")
+    void SetCurrentDepositBag(ATRGBag* NewBag);
 
 protected:
     UFUNCTION()
@@ -101,6 +128,12 @@ protected:
 
     UFUNCTION()
     void OnRep_CurrentCollectingNode();
+
+    UFUNCTION()
+    void OnRep_CurrentDepositBag();
+
+    UFUNCTION()
+    void OnRep_CarriedSample();
 
     void TryInteract();
 
@@ -113,9 +146,8 @@ protected:
     void OnMoveInputForCollection(const FInputActionValue& Value);
 
     UFUNCTION(Server, Reliable)
-    void Server_CancelCollection();
+    void Server_CancelActiveInteraction();
 
 private:
-    void SetCurrentCollectingNode(AResourceNode* NewNode);
-    void ServerValidateCollection();
+    void ServerValidateActiveInteraction();
 };

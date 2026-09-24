@@ -138,7 +138,7 @@ void ABismillahKiller::Server_PerformAttack_Implementation()
     // --- Cancel any in-progress collection FIRST, before the state-advance switch.
     //     Getting hit always interrupts collection, regardless of whether the melee
     //     also advances the survivor's state (which it does not for Downed/Captured).
-    if (Survivor->CancelCollection(TEXT("hit by killer melee")))
+    if (Survivor->CancelActiveInteraction(TEXT("hit by killer melee")))
     {
         UE_LOG(LogTemp, Warning, TEXT("PerformAttack: interrupted collection on '%s'"), *Survivor->GetName());
     }

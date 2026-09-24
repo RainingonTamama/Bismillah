@@ -11,9 +11,9 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Core/Interactables/InteractableBase.h"
 #include "Core/Interactables/ResourceNode.h"
+#include "Core/Interactables/TRGBag.h"
 
-/** Horizontal velocity above which the server treats the survivor as "moving" during a collection. */
-static constexpr float CollectionMovementVelocityThreshold = 20.0f;
+static constexpr float ActiveInteractionMovementVelocityThreshold = 20.0f;
 
 ABismillahSurvivor::ABismillahSurvivor()
 {
@@ -23,9 +23,7 @@ ABismillahSurvivor::ABismillahSurvivor()
 void ABismillahSurvivor::BeginPlay()
 {
     Super::BeginPlay();
-
     CurrentHealth = MaxHealth;
-
     UE_LOG(LogTemp, Warning, TEXT("Survivor spawned"));
 }
 
@@ -36,6 +34,8 @@ void ABismillahSurvivor::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& O
     DOREPLIFETIME(ABismillahSurvivor, CurrentHealth);
     DOREPLIFETIME(ABismillahSurvivor, SurvivorState);
     DOREPLIFETIME(ABismillahSurvivor, CurrentCollectingNode);
+    DOREPLIFETIME(ABismillahSurvivor, CurrentDepositBag);
+    DOREPLIFETIME(ABismillahSurvivor, CarriedSample);
 }
 
 void ABismillahSurvivor::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -48,11 +48,6 @@ void ABismillahSurvivor::SetupPlayerInputComponent(UInputComponent* PlayerInputC
         {
             EnhancedInput->BindAction(InteractAction, ETriggerEvent::Started, this, &ABismillahSurvivor::TryInteract);
         }
-        else
-        {
-            UE_LOG(LogTemp, Warning, TEXT("ABismillahSurvivor: InteractAction is not assigned (set it on BP_BismillahSurvivor)."));
-        }
-
         if (MoveAction)
         {
             EnhancedInput->BindAction(MoveAction, ETriggerEvent::Triggered, this, &ABismillahSurvivor::OnMoveInputForCollection);
@@ -69,10 +64,10 @@ void ABismillahSurvivor::Tick(float DeltaSeconds)
         return;
     }
 
-    ServerValidateCollection();
+    ServerValidateActiveInteraction();
 }
 
-// ---------------- Collection node tracking ----------------
+// ---------------- Setters / OnRep ----------------
 
 void ABismillahSurvivor::SetCurrentCollectingNode(AResourceNode* NewNode)
 {
@@ -83,11 +78,24 @@ void ABismillahSurvivor::SetCurrentCollectingNode(AResourceNode* NewNode)
 
     CurrentCollectingNode = NewNode;
 
-    // OnRep only fires on clients. On the authority (listen server) we must fire
-    // the event explicitly, otherwise the host's own player never gets notified.
     if (HasAuthority())
     {
         OnCollectingNodeChanged(CurrentCollectingNode);
+    }
+}
+
+void ABismillahSurvivor::SetCurrentDepositBag(ATRGBag* NewBag)
+{
+    if (CurrentDepositBag == NewBag)
+    {
+        return;
+    }
+
+    CurrentDepositBag = NewBag;
+
+    if (HasAuthority())
+    {
+        OnDepositBagChanged(CurrentDepositBag);
     }
 }
 
@@ -96,39 +104,115 @@ void ABismillahSurvivor::OnRep_CurrentCollectingNode()
     OnCollectingNodeChanged(CurrentCollectingNode);
 }
 
-// ---------------- Cancellation ----------------
+void ABismillahSurvivor::OnRep_CurrentDepositBag()
+{
+    OnDepositBagChanged(CurrentDepositBag);
+}
 
-bool ABismillahSurvivor::CancelCollection(const FString& Reason)
+void ABismillahSurvivor::OnRep_CarriedSample()
+{
+    OnCarriedSampleChanged(CarriedSample.SampleID, CarriedSample.DisplayName, CarriedSample.ResearchValue);
+}
+
+// ---------------- Carried sample ----------------
+
+bool ABismillahSurvivor::GiveSample(const FSampleData& SampleData)
 {
     if (!HasAuthority())
     {
         return false;
     }
 
-    if (!CurrentCollectingNode)
+    if (CarriedSample.IsValid())
     {
         return false;
     }
 
-    UE_LOG(LogTemp, Warning,
-        TEXT("CancelCollection: '%s' cancelling '%s' (reason: %s)"),
-        *GetName(), *CurrentCollectingNode->GetName(), *Reason);
+    if (SampleData.SampleID.IsNone())
+    {
+        return false;
+    }
 
-    CurrentCollectingNode->StopCollection(true);
-    SetCurrentCollectingNode(nullptr);
+    CarriedSample.SampleID = SampleData.SampleID;
+    CarriedSample.DisplayName = SampleData.DisplayName;
+    CarriedSample.ResearchValue = SampleData.ResearchValue;
+
+    UE_LOG(LogTemp, Warning,
+        TEXT("Survivor '%s': now carrying sample '%s' (value=%d)"),
+        *GetName(), *CarriedSample.SampleID.ToString(), CarriedSample.ResearchValue);
+
+    if (HasAuthority())
+    {
+        OnCarriedSampleChanged(CarriedSample.SampleID, CarriedSample.DisplayName, CarriedSample.ResearchValue);
+    }
+
     return true;
 }
 
-void ABismillahSurvivor::Server_CancelCollection_Implementation()
+void ABismillahSurvivor::ClearSample()
 {
-    CancelCollection(TEXT("player requested"));
+    if (!HasAuthority())
+    {
+        return;
+    }
+
+    if (!CarriedSample.IsValid())
+    {
+        return;
+    }
+
+    UE_LOG(LogTemp, Warning, TEXT("Survivor '%s': cleared carried sample '%s'"),
+        *GetName(), *CarriedSample.SampleID.ToString());
+
+    CarriedSample.Reset();
+
+    OnCarriedSampleChanged(CarriedSample.SampleID, CarriedSample.DisplayName, CarriedSample.ResearchValue);
 }
 
-// ---------------- Movement cancel ----------------
+// ---------------- Cancel / validation ----------------
+
+bool ABismillahSurvivor::CancelActiveInteraction(const FString& Reason)
+{
+    if (!HasAuthority())
+    {
+        return false;
+    }
+
+    bool bCancelled = false;
+
+    if (CurrentCollectingNode)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("CancelActiveInteraction: '%s' cancelling collection of '%s' (reason: %s)"),
+            *GetName(), *CurrentCollectingNode->GetName(), *Reason);
+
+        CurrentCollectingNode->StopCollection(true);
+        SetCurrentCollectingNode(nullptr);
+        bCancelled = true;
+    }
+
+    if (CurrentDepositBag)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("CancelActiveInteraction: '%s' cancelling deposit at '%s' (reason: %s)"),
+            *GetName(), *CurrentDepositBag->GetName(), *Reason);
+
+        CurrentDepositBag->StopDeposit(true);
+        SetCurrentDepositBag(nullptr);
+        bCancelled = true;
+    }
+
+    return bCancelled;
+}
+
+void ABismillahSurvivor::Server_CancelActiveInteraction_Implementation()
+{
+    CancelActiveInteraction(TEXT("player requested"));
+}
 
 void ABismillahSurvivor::OnMoveInputForCollection(const FInputActionValue& Value)
 {
-    if (!CurrentCollectingNode)
+    if (!CurrentCollectingNode && !CurrentDepositBag)
     {
         return;
     }
@@ -139,56 +223,73 @@ void ABismillahSurvivor::OnMoveInputForCollection(const FInputActionValue& Value
         return;
     }
 
-    UE_LOG(LogTemp, Warning,
-        TEXT("OnMoveInputForCollection: movement input detected for '%s' during collection of '%s', requesting cancel."),
-        *GetName(), *CurrentCollectingNode->GetName());
-
-    Server_CancelCollection();
+    Server_CancelActiveInteraction();
 }
 
-// ---------------- Server validation ----------------
-
-void ABismillahSurvivor::ServerValidateCollection()
+void ABismillahSurvivor::ServerValidateActiveInteraction()
 {
-    if (!CurrentCollectingNode)
+    // Guard against invalid/missing node or bag first.
+    if (CurrentCollectingNode)
     {
-        return;
+        if (!IsValid(CurrentCollectingNode)
+            || !CurrentCollectingNode->IsBeingCollected()
+            || CurrentCollectingNode->GetCurrentCollector() != this)
+        {
+            SetCurrentCollectingNode(nullptr);
+        }
     }
 
-    if (!IsValid(CurrentCollectingNode)
-        || !CurrentCollectingNode->IsBeingCollected()
-        || CurrentCollectingNode->GetCurrentCollector() != this)
+    if (CurrentDepositBag)
     {
-        SetCurrentCollectingNode(nullptr);
+        if (!IsValid(CurrentDepositBag)
+            || !CurrentDepositBag->IsBeingUsed()
+            || CurrentDepositBag->GetCurrentDepositor() != this)
+        {
+            SetCurrentDepositBag(nullptr);
+        }
+    }
+
+    if (!CurrentCollectingNode && !CurrentDepositBag)
+    {
         return;
     }
 
     // Movement check.
     const float HorizVelocitySq = GetVelocity().SizeSquared2D();
-    if (HorizVelocitySq > FMath::Square(CollectionMovementVelocityThreshold))
+    if (HorizVelocitySq > FMath::Square(ActiveInteractionMovementVelocityThreshold))
     {
-        UE_LOG(LogTemp, Warning,
-            TEXT("ServerValidateCollection: '%s' is moving (v^2=%.1f) while collecting '%s', cancelling."),
-            *GetName(), HorizVelocitySq, *CurrentCollectingNode->GetName());
-
-        CancelCollection(TEXT("moved while collecting"));
+        CancelActiveInteraction(TEXT("moved during interaction"));
         return;
     }
 
-    // Distance check.
-    const USphereComponent* NodeSphere = CurrentCollectingNode->GetInteractionSphere();
-    const float NodeRadius = NodeSphere ? NodeSphere->GetScaledSphereRadius() : 0.0f;
-    const float CapsuleRadius = GetCapsuleComponent() ? GetCapsuleComponent()->GetScaledCapsuleRadius() : 0.0f;
-    const float MaxDist = NodeRadius + CapsuleRadius + 50.0f;
+    // Distance check against the active target's sphere.
+    USphereComponent* TargetSphere = nullptr;
+    AActor* TargetActor = nullptr;
 
-    const float DistSq = FVector::DistSquared(GetActorLocation(), CurrentCollectingNode->GetActorLocation());
+    if (CurrentCollectingNode)
+    {
+        TargetSphere = CurrentCollectingNode->GetInteractionSphere();
+        TargetActor = CurrentCollectingNode;
+    }
+    else if (CurrentDepositBag)
+    {
+        TargetSphere = CurrentDepositBag->GetInteractionSphere();
+        TargetActor = CurrentDepositBag;
+    }
+
+    if (!TargetSphere || !TargetActor)
+    {
+        return;
+    }
+
+    const float TargetRadius = TargetSphere->GetScaledSphereRadius();
+    const float CapsuleRadius = GetCapsuleComponent() ? GetCapsuleComponent()->GetScaledCapsuleRadius() : 0.0f;
+    const float MaxDist = TargetRadius + CapsuleRadius + 50.0f;
+
+    const float DistSq = FVector::DistSquared(GetActorLocation(), TargetActor->GetActorLocation());
     if (DistSq > FMath::Square(MaxDist))
     {
-        UE_LOG(LogTemp, Warning,
-            TEXT("ServerValidateCollection: '%s' moved out of range of '%s' (dist^2=%.0f, max^2=%.0f), cancelling."),
-            *GetName(), *CurrentCollectingNode->GetName(), DistSq, FMath::Square(MaxDist));
-
-        CancelCollection(TEXT("moved out of range"));
+        CancelActiveInteraction(TEXT("moved out of range"));
     }
 }
 
@@ -239,6 +340,23 @@ void ABismillahSurvivor::SetSurvivorState(ESurvivorState NewState)
     }
 
     SurvivorState = NewState;
+
+    // Entering a state that prevents carrying destroys the sample.
+    if (NewState == ESurvivorState::Downed ||
+        NewState == ESurvivorState::BeingDragged ||
+        NewState == ESurvivorState::Captured)
+    {
+        if (CarriedSample.IsValid())
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("Survivor '%s': entered state %s while carrying '%s' — sample destroyed."),
+                *GetName(), *UEnum::GetValueAsString(NewState), *CarriedSample.SampleID.ToString());
+            ClearSample();
+        }
+
+        // Also cancel any active interaction (collection or deposit).
+        CancelActiveInteraction(TEXT("state changed to non-collecting"));
+    }
 }
 
 void ABismillahSurvivor::OnRep_SurvivorState()
@@ -254,11 +372,8 @@ void ABismillahSurvivor::TryInteract()
         return;
     }
 
-    // Mini-game routing: if a mini-game is active on the node we're collecting,
-    // this press resolves it instead of interacting.
     if (CurrentCollectingNode && CurrentCollectingNode->IsAwaitingMiniGame())
     {
-        UE_LOG(LogTemp, Warning, TEXT("TryInteract: routing to Server_NotifyMiniGamePress (mini-game active)."));
         Server_NotifyMiniGamePress();
         return;
     }
@@ -324,8 +439,6 @@ void ABismillahSurvivor::TryInteract()
         return;
     }
 
-    UE_LOG(LogTemp, Warning, TEXT("TryInteract: found interactable '%s'"), *BestInteractable->GetName());
-
     if (!BestInteractable->CanInteract(this))
     {
         UE_LOG(LogTemp, Warning, TEXT("TryInteract: '%s' refused interaction (CanInteract=false)"), *BestInteractable->GetName());
@@ -337,29 +450,10 @@ void ABismillahSurvivor::TryInteract()
 
 void ABismillahSurvivor::Server_NotifyMiniGamePress_Implementation()
 {
-    if (!CurrentCollectingNode)
+    if (!CurrentCollectingNode || !CurrentCollectingNode->IsAwaitingMiniGame())
     {
-        UE_LOG(LogTemp, Warning, TEXT("Server_NotifyMiniGamePress: no CurrentCollectingNode."));
         return;
     }
-
-    if (!CurrentCollectingNode->IsBeingCollected() || CurrentCollectingNode->GetCurrentCollector() != this)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("Server_NotifyMiniGamePress: we are not the collector of '%s'."),
-            *CurrentCollectingNode->GetName());
-        return;
-    }
-
-    if (!CurrentCollectingNode->IsAwaitingMiniGame())
-    {
-        UE_LOG(LogTemp, Warning, TEXT("Server_NotifyMiniGamePress: node '%s' is not awaiting a mini-game."),
-            *CurrentCollectingNode->GetName());
-        return;
-    }
-
-    UE_LOG(LogTemp, Warning, TEXT("Server_NotifyMiniGamePress: forwarding to node '%s' for resolution."),
-        *CurrentCollectingNode->GetName());
-
     CurrentCollectingNode->ResolveMiniGame();
 }
 
@@ -367,7 +461,6 @@ void ABismillahSurvivor::Server_Interact_Implementation(AInteractableBase* Targe
 {
     if (!Target)
     {
-        UE_LOG(LogTemp, Warning, TEXT("Server_Interact: target was null"));
         return;
     }
 
@@ -377,25 +470,24 @@ void ABismillahSurvivor::Server_Interact_Implementation(AInteractableBase* Targe
         return;
     }
 
+    // Switching between interactions: cancel whichever is active if it's not this target.
     if (CurrentCollectingNode && CurrentCollectingNode != Target)
     {
-        UE_LOG(LogTemp, Warning, TEXT("Server_Interact: switching from '%s' to '%s'"),
-            *CurrentCollectingNode->GetName(), *Target->GetName());
-
-        CancelCollection(TEXT("switched to a different interactable"));
+        CancelActiveInteraction(TEXT("switched to a different interactable"));
     }
-
-    UE_LOG(LogTemp, Warning, TEXT("Server_Interact: executing OnInteract on '%s' for '%s'"),
-        *Target->GetName(), *GetName());
+    if (CurrentDepositBag && CurrentDepositBag != Target)
+    {
+        CancelActiveInteraction(TEXT("switched to a different interactable"));
+    }
 
     Target->OnInteract(this);
 
+    // Sync tracking pointers based on post-OnInteract state.
     if (AResourceNode* Node = Cast<AResourceNode>(Target))
     {
         if (Node->IsBeingCollected() && Node->GetCurrentCollector() == this)
         {
             SetCurrentCollectingNode(Node);
-
             if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
             {
                 MoveComp->StopMovementImmediately();
@@ -404,6 +496,21 @@ void ABismillahSurvivor::Server_Interact_Implementation(AInteractableBase* Targe
         else
         {
             SetCurrentCollectingNode(nullptr);
+        }
+    }
+    else if (ATRGBag* Bag = Cast<ATRGBag>(Target))
+    {
+        if (Bag->IsBeingUsed() && Bag->GetCurrentDepositor() == this)
+        {
+            SetCurrentDepositBag(Bag);
+            if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+            {
+                MoveComp->StopMovementImmediately();
+            }
+        }
+        else
+        {
+            SetCurrentDepositBag(nullptr);
         }
     }
 }
